@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="theme-color" content="#03101d" />
+    <title>LifeQuest 90 — Offline</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Arial, sans-serif;
+        background: #020711;
+        color: #eef7ff;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        min-height: 100vh;
+        min-height: 100dvh;
+        margin: 0;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background:
+          radial-gradient(circle at 50% 22%, #31d7ff24, transparent 34%),
+          linear-gradient(145deg, #020711, #071523);
+      }
+      main {
+        width: min(520px, 100%);
+        padding: 36px;
+        border: 1px solid #31d7ff66;
+        background: #07111ddd;
+        box-shadow: 0 24px 80px #000c, inset 0 0 40px #31d7ff0a;
+        text-align: center;
+      }
+      .emblem {
+        width: 92px;
+        height: 92px;
+        margin: 0 auto 24px;
+        display: grid;
+        place-items: center;
+        border: 2px solid #31d7ff;
+        border-radius: 22px;
+        color: #31d7ff;
+        box-shadow: 0 0 30px #31d7ff44;
+        font-size: 28px;
+        font-weight: 900;
+      }
+      .emblem span {
+        color: #caff4a;
+        font-size: 13px;
+      }
+      h1 {
+        margin: 0 0 12px;
+        font-size: clamp(2rem, 8vw, 3.2rem);
+        text-transform: uppercase;
+      }
+      p {
+        margin: 0 auto 24px;
+        max-width: 390px;
+        color: #91a4b8;
+        line-height: 1.65;
+      }
+      button {
+        padding: 13px 20px;
+        border: 1px solid #31d7ff;
+        background: #31d7ff18;
+        color: #75e7ff;
+        font-weight: 800;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="emblem">LQ<br /><span>90</span></div>
+      <h1>Signal lost</h1>
+      <p>
+        LifeQuest cannot reach the network right now. Reconnect to continue
+        syncing tasks, OTP sign-in and Quest AI.
+      </p>
+      <button type="button" onclick="location.reload()">Try again</button>
+    </main>
+  </body>
+</html>
