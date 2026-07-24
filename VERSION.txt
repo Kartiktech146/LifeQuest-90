@@ -1,0 +1,6 @@
+LifeQuest 90 Final Connected Edition
+Build date: 2026-07-22
+
+Includes Gmail OTP, mobile SMS OTP, secure sessions, logout, permanent account
+deletion, per-user saved state, automatic local database setup, Quest AI, Coin
+Store, fixed 90-day reset, settings, gym, revision, expenses, and rewards.
