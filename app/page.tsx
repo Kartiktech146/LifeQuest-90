@@ -5,7 +5,7 @@ import { CSSProperties, FormEvent, useEffect, useMemo, useRef, useState } from "
 type Tab = "overview" | "reset" | "planner" | "revision" | "alarm" | "gym" | "expenses" | "rewards" | "change" | "history" | "settings";
 type Task = { id: number; title: string; duration: number; priority: "High" | "Medium" | "Low"; start: string; done: boolean; xp: number };
 type Habit = { id: number; name: string; streak: number; done: boolean; reward: number };
-type Revision = { id: number; title: string; url: string; nextReview: string; mastery: number; level: number; done: boolean };
+type Revision = { id: number; title: string; url: string; nextReview: string; reviewDate?: string; mastery: number; level: number; done: boolean };
 type Alarm = { id: number; time: string; label: string; mission: string; enabled: boolean };
 type Expense = { id: number; title: string; category: string; amount: number; date: string };
 type Reward = { id: number; title: string; emoji: string; cost: number; cooldown: string; redeemed: number };
@@ -16,10 +16,19 @@ type ChangeHabit = { id: number; name: string; type: "build" | "break"; identity
 type AssistantMessage = { role: "ai" | "user"; text: string };
 type Recommendation = { code: string; title: string; detail: string; action: string; tab: Tab; tone: "cyan" | "lime" | "amber" | "purple" };
 type DayLog = { date: string; tasks: { title: string; done: boolean }[]; habits: { title: string; done: boolean }[] };
-type AppAccount = { id: string; name: string; method: "mobile" | "google"; label: string };
+type AppAccount = { id: string; name: string; method: "mobile" | "google"; label: string; createdAt?: string };
 
 type LifeQuestState = {
-  profile: { name: string; day: number; xp: number; coins: number; streak: number; focusMinutes: number };
+  profile: {
+    name: string;
+    day: number;
+    xp: number;
+    coins: number;
+    streak: number;
+    focusMinutes: number;
+    journeyStartedOn?: string;
+    lastActiveDate?: string;
+  };
   tasks: Task[];
   habits: Habit[];
   revisions: Revision[];
@@ -34,10 +43,104 @@ type LifeQuestState = {
   history: DayLog[];
 };
 
-const TODAY = new Date().toISOString().slice(0, 10);
+const DATE_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+function localDateKey(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function dateFromKey(value: string) {
+  const [year, month, day] = value.split("-").map(Number);
+  return new Date(year, month - 1, day);
+}
+
+function shiftDateKey(value: string, days: number) {
+  const date = dateFromKey(value);
+  date.setDate(date.getDate() + days);
+  return localDateKey(date);
+}
+
+function daysBetween(startedOn: string, today: string) {
+  const start = dateFromKey(startedOn);
+  const current = dateFromKey(today);
+  return Math.floor((Date.UTC(current.getFullYear(), current.getMonth(), current.getDate()) - Date.UTC(start.getFullYear(), start.getMonth(), start.getDate())) / 86_400_000);
+}
+
+function campaignDay(startedOn: string, today: string) {
+  const elapsed = daysBetween(startedOn, today);
+  return Math.min(90, Math.max(1, elapsed + 1));
+}
+
+function revisionDate(item: Revision, today: string) {
+  if (item.reviewDate && DATE_KEY_PATTERN.test(item.reviewDate)) return item.reviewDate;
+  if (item.nextReview === "Today") return today;
+  if (item.nextReview === "Tomorrow") return shiftDateKey(today, 1);
+  return undefined;
+}
+
+function revisionLabel(item: Revision, today: string) {
+  const due = revisionDate(item, today);
+  if (!due) return item.nextReview;
+  if (due <= today) return due === today ? "Today" : "Overdue";
+  if (due === shiftDateKey(today, 1)) return "Tomorrow";
+  return dateFromKey(due).toLocaleDateString("en-IN", { day: "numeric", month: "short" });
+}
+
+function syncStateToDate(current: LifeQuestState, today: string, accountStartedOn?: string): LifeQuestState {
+  const savedDay = Math.min(90, Math.max(1, Number(current.profile.day) || 1));
+  const journeyStartedOn = current.profile.journeyStartedOn && DATE_KEY_PATTERN.test(current.profile.journeyStartedOn)
+    ? current.profile.journeyStartedOn
+    : accountStartedOn && DATE_KEY_PATTERN.test(accountStartedOn)
+      ? accountStartedOn
+      : shiftDateKey(today, -(savedDay - 1));
+  const day = campaignDay(journeyStartedOn, today);
+  const lastActiveDate = current.profile.lastActiveDate && DATE_KEY_PATTERN.test(current.profile.lastActiveDate)
+    ? current.profile.lastActiveDate
+    : today;
+  const revisions = current.revisions.map((item) => {
+    const reviewDate = revisionDate(item, lastActiveDate);
+    return reviewDate && item.reviewDate !== reviewDate ? { ...item, reviewDate } : item;
+  });
+  const revisionsChanged = revisions.some((item, index) => item !== current.revisions[index]);
+
+  if (lastActiveDate === today) {
+    if (current.profile.day === day && current.profile.journeyStartedOn === journeyStartedOn && current.profile.lastActiveDate === today && !revisionsChanged) return current;
+    return { ...current, profile: { ...current.profile, day, journeyStartedOn, lastActiveDate: today }, revisions };
+  }
+
+  const previousLog: DayLog = {
+    date: lastActiveDate,
+    tasks: current.tasks.map((item) => ({ title: item.title, done: item.done })),
+    habits: current.habits.map((item) => ({ title: item.name, done: item.done })),
+  };
+  const history = [...(current.history || []).filter((item) => item.date !== lastActiveDate), previousLog]
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .slice(-90);
+  const currentDayCode = dateFromKey(today).toLocaleDateString("en-US", { weekday: "short" }).toUpperCase();
+  const elapsedDays = daysBetween(lastActiveDate, today);
+  const completedPriorities = current.tasks.filter((item) => item.done && item.priority === "High").length;
+  const dayGoalMet = completedPriorities >= (current.settings?.dailyGoal || 3);
+
+  return {
+    ...current,
+    profile: { ...current.profile, day, journeyStartedOn, lastActiveDate: today, streak: elapsedDays === 1 && dayGoalMet ? current.profile.streak + 1 : 0 },
+    tasks: current.tasks.map((item) => ({ ...item, done: false })),
+    habits: current.habits.map((item) => ({ ...item, done: false, streak: elapsedDays === 1 && item.done ? item.streak : 0 })),
+    revisions: revisions.map((item) => ({ ...item, done: false })),
+    changeHabits: current.changeHabits.map((item) => ({ ...item, done: false, streak: elapsedDays === 1 && item.done ? item.streak : 0 })),
+    workouts: current.workouts.map((item) => item.day === currentDayCode
+      ? { ...item, complete: false, exercises: item.exercises.map((exercise) => ({ ...exercise, done: false })) }
+      : item),
+    checkin: { ...current.checkin, morning: "", evening: "" },
+    history,
+  };
+}
 
 const DEFAULT_STATE: LifeQuestState = {
-  profile: { name: "Kartik", day: 24, xp: 2480, coins: 1280, streak: 12, focusMinutes: 135 },
+  profile: { name: "Kartik", day: 1, xp: 2480, coins: 1280, streak: 12, focusMinutes: 135 },
   tasks: [
     { id: 1, title: "Deep work: Machine Learning", duration: 90, priority: "High", start: "04:30", done: true, xp: 120 },
     { id: 2, title: "Morning workout", duration: 45, priority: "High", start: "06:15", done: false, xp: 80 },
@@ -144,13 +247,17 @@ function dailyQuote(date = new Date()) {
   return DAILY_QUOTES[Math.abs(day) % DAILY_QUOTES.length];
 }
 
-function getRecommendations(state: LifeQuestState): Recommendation[] {
+function getRecommendations(state: LifeQuestState, currentDayCode: string, today: string): Recommendation[] {
   const incomplete = state.tasks.filter((task) => !task.done);
   const urgent = incomplete.find((task) => task.priority === "High") || incomplete[0];
-  const dueRevision = state.revisions.find((item) => item.nextReview === "Today" && !item.done);
+  const dueRevision = state.revisions.find((item) => {
+    if (item.done) return false;
+    const due = today ? revisionDate(item, today) : undefined;
+    return due ? due <= today : item.nextReview === "Today";
+  });
   const spend = state.expenses.items.reduce((sum, item) => sum + item.amount, 0);
   const budgetPercent = state.expenses.budget ? Math.round((spend / state.expenses.budget) * 100) : 0;
-  const workout = state.workouts.find((day) => !day.complete);
+  const workout = state.workouts.find((day) => day.day === currentDayCode && !day.complete);
   const habit = state.habits.find((item) => !item.done);
   const picks: Recommendation[] = [];
 
@@ -166,6 +273,8 @@ export default function Home() {
   const [active, setActive] = useState<Tab>("overview");
   const [state, setState] = useState<LifeQuestState>(DEFAULT_STATE);
   const [account, setAccount] = useState<AppAccount | null>(null);
+  const [clock, setClock] = useState<Date | null>(null);
+  const [sessionLoading, setSessionLoading] = useState(true);
   const [hydrated, setHydrated] = useState(false);
   const [syncStatus, setSyncStatus] = useState<"loading" | "saved" | "saving" | "offline">("loading");
   const firstSave = useRef(true);
@@ -176,21 +285,48 @@ export default function Home() {
   const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([
     { role: "ai", text: "Commander online. I analyse your missions, habits, revision, fitness and budget to recommend the smartest next move." },
   ]);
+  const today = clock ? localDateKey(clock) : "";
+  const currentDayCode = clock ? clock.toLocaleDateString("en-US", { weekday: "short" }).toUpperCase() : "MON";
+  const currentDateTime = clock
+    ? clock.toLocaleString("en-IN", { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }).toUpperCase()
+    : "SYNCING DATE & TIME";
 
   useEffect(() => {
-    fetch("/api/auth/session").then((response) => response.ok ? response.json() : Promise.reject())
-      .then((payload) => setAccount(payload.user)).catch(() => setAccount(null));
+    const updateClock = () => {
+      const next = new Date();
+      setClock(next);
+      setState((current) => syncStateToDate(current, localDateKey(next)));
+    };
+    updateClock();
+    const timer = window.setInterval(updateClock, 30_000);
+    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
-    if (!account) { setHydrated(true); setSyncStatus("offline"); return; }
-    setHydrated(false);
+    fetch("/api/auth/session").then((response) => response.ok ? response.json() : Promise.reject())
+      .then((payload) => setAccount(payload.user)).catch(() => setAccount(null)).finally(() => setSessionLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (sessionLoading) return;
+    if (!account) {
+      const timer = window.setTimeout(() => { setHydrated(true); setSyncStatus("offline"); }, 0);
+      return () => window.clearTimeout(timer);
+    }
+    const timer = window.setTimeout(() => setHydrated(false), 0);
     fetch("/api/state")
       .then((response) => response.ok ? response.json() : Promise.reject())
-      .then((payload) => { if (payload.state) setState(payload.state); setSyncStatus("saved"); })
+      .then((payload) => {
+        if (payload.state) {
+          const startedOn = account.createdAt ? localDateKey(new Date(account.createdAt)) : undefined;
+          setState(syncStateToDate(payload.state, localDateKey(new Date()), startedOn));
+        }
+        setSyncStatus("saved");
+      })
       .catch(() => setSyncStatus("offline"))
       .finally(() => setHydrated(true));
-  }, [account]);
+    return () => window.clearTimeout(timer);
+  }, [account, sessionLoading]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -215,9 +351,12 @@ export default function Home() {
     notify(`${message}  +${xp} XP  +${coins} coins`);
   };
 
-  const expenseTotal = useMemo(() => state.expenses.items.reduce((sum, item) => sum + item.amount, 0), [state.expenses.items]);
+  const currentMonthKey = today.slice(0, 7);
+  const expenseTotal = useMemo(() => state.expenses.items
+    .filter((item) => !currentMonthKey || item.date.startsWith(currentMonthKey))
+    .reduce((sum, item) => sum + item.amount, 0), [state.expenses.items, currentMonthKey]);
   const completedTasks = state.tasks.filter((task) => task.done).length;
-  const recommendations = useMemo(() => getRecommendations(state), [state]);
+  const recommendations = useMemo(() => getRecommendations(state, currentDayCode, today), [state, currentDayCode, today]);
   const equippedSticker = STORE_ITEMS.find((item) => item.id === state.store?.equipped.sticker);
   const equippedBadge = STORE_ITEMS.find((item) => item.id === state.store?.equipped.badge);
   const equippedEffect = state.store?.equipped.effect;
@@ -287,22 +426,22 @@ export default function Home() {
 
       <section className="main-stage">
         <header className="topbar">
-          <div><span className={`online-dot ${syncStatus === "offline" ? "offline" : ""}`} /> {syncStatus === "saving" ? "SAVING PROGRESS" : syncStatus === "offline" ? "LOCAL MODE" : "SYSTEM ONLINE"} <b>· WED, 22 JUL</b></div>
+          <div><span className={`online-dot ${syncStatus === "offline" ? "offline" : ""}`} /> {syncStatus === "saving" ? "SAVING PROGRESS" : syncStatus === "offline" ? "LOCAL MODE" : "SYSTEM ONLINE"} <b>· {currentDateTime}</b></div>
           <div className="resource-bar"><button className="ai-online-button" onClick={() => setAssistantOpen(true)}><i/> QUEST AI</button><span>🔥 <b>{state.profile.streak}</b> day streak</span><span>◈ <b>{state.profile.coins.toLocaleString("en-IN")}</b> coins</span><button aria-label="Notifications" onClick={async () => { if ("Notification" in window) { const result = await Notification.requestPermission(); notify(result === "granted" ? "Quest alerts enabled" : "Alerts remain disabled"); } }}>♢</button></div>
         </header>
 
         <div className="dashboard">
-          {active === "overview" && <Overview state={state} expenseTotal={expenseTotal} completedTasks={completedTasks} recommendations={recommendations} toggleTask={toggleTask} toggleHabit={toggleHabit} go={setActive} openAssistant={() => setAssistantOpen(true)} />}
+          {active === "overview" && <Overview state={state} expenseTotal={expenseTotal} completedTasks={completedTasks} recommendations={recommendations} toggleTask={toggleTask} toggleHabit={toggleHabit} go={setActive} openAssistant={() => setAssistantOpen(true)} currentDayCode={currentDayCode} clock={clock} />}
           {active === "reset" && <ResetModule state={state} setState={setState} award={award} />}
           {active === "planner" && <PlannerModule state={state} setState={setState} toggleTask={toggleTask} toggleHabit={toggleHabit} notify={notify} />}
-          {active === "revision" && <RevisionModule state={state} setState={setState} award={award} />}
+          {active === "revision" && <RevisionModule state={state} setState={setState} award={award} today={today} />}
           {active === "alarm" && <AlarmModule state={state} setState={setState} notify={notify} />}
-          {active === "gym" && <GymModule state={state} setState={setState} award={award} />}
-          {active === "expenses" && <ExpenseModule state={state} setState={setState} total={expenseTotal} notify={notify} />}
+          {active === "gym" && <GymModule state={state} setState={setState} award={award} currentDayCode={currentDayCode} />}
+          {active === "expenses" && <ExpenseModule state={state} setState={setState} total={expenseTotal} notify={notify} today={today} />}
           {active === "rewards" && <RewardModule state={state} setState={setState} notify={notify} />}
           {active === "change" && <ChangeModule state={state} setState={setState} award={award} />}
-          {active === "history" && <HistoryModule state={state} />}
-          {active === "settings" && <SettingsModule state={state} setState={setState} account={account} logout={async () => { await fetch("/api/auth/logout", { method: "POST" }); setAccount(null); setState(DEFAULT_STATE); setActive("overview"); }} notify={notify} />}
+          {active === "history" && <HistoryModule state={state} today={today} />}
+          {active === "settings" && <SettingsModule state={state} setState={setState} account={account} logout={async () => { await fetch("/api/auth/logout", { method: "POST" }); setAccount(null); setState(DEFAULT_STATE); setActive("overview"); }} notify={notify} today={today} />}
         </div>
       </section>
       <button className={`ai-companion ${assistantOpen ? "active" : ""}`} onClick={() => setAssistantOpen((open) => !open)} aria-label="Open Quest AI assistant"><span className="ai-core">AI</span><i/><b>ASK QUEST AI</b></button>
@@ -350,44 +489,46 @@ function LoginGate({ onLogin }: { onLogin: (account: AppAccount) => void }) {
   </section></div>;
 }
 
-function HistoryModule({ state }: { state: LifeQuestState }) {
-  const todayLog: DayLog = { date: TODAY, tasks: state.tasks.map((item) => ({ title: item.title, done: item.done })), habits: state.habits.map((item) => ({ title: item.name, done: item.done })) };
-  const logs = [...(state.history || []).filter((item) => item.date !== TODAY), todayLog].sort((a, b) => b.date.localeCompare(a.date));
-  const [selected, setSelected] = useState(TODAY);
-  const activeLog = logs.find((item) => item.date === selected) || logs[0];
+function HistoryModule({ state, today }: { state: LifeQuestState; today: string }) {
+  const activeDate = today || state.profile.lastActiveDate || "";
+  const todayLog: DayLog = { date: activeDate, tasks: state.tasks.map((item) => ({ title: item.title, done: item.done })), habits: state.habits.map((item) => ({ title: item.name, done: item.done })) };
+  const logs = [...(state.history || []).filter((item) => item.date !== activeDate), ...(activeDate ? [todayLog] : [])].sort((a, b) => b.date.localeCompare(a.date));
+  const [selected, setSelected] = useState("");
+  const selectedDate = selected && logs.some((item) => item.date === selected) ? selected : activeDate;
+  const activeLog = logs.find((item) => item.date === selectedDate) || logs[0];
   const all = [...(activeLog?.tasks || []), ...(activeLog?.habits || [])];
   const complete = all.filter((item) => item.done).length;
   return <><ModuleHeader code="MISSION ARCHIVE // DAILY REVIEW" title="See every day clearly." text="Select a date to check exactly which tasks and habits were completed and which were missed." stat={`${complete} / ${all.length} DONE`} />
-    <section className="history-layout"><article className="game-panel history-calendar"><div className="panel-heading"><div><span className="eyebrow">RECENT DAYS</span><h2>Activity timeline</h2></div></div><div className="day-grid">{logs.map((log) => { const entries = [...log.tasks, ...log.habits]; const score = entries.filter((x) => x.done).length; return <button key={log.date} className={selected === log.date ? "active" : ""} onClick={() => setSelected(log.date)}><time>{new Date(`${log.date}T00:00:00`).toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}</time><b>{score}/{entries.length}</b><i style={{ width: `${entries.length ? score / entries.length * 100 : 0}%` }}/><span>{score === entries.length ? "ALL CLEAR" : `${entries.length - score} MISSED`}</span></button>; })}</div></article>
-      <article className="game-panel history-detail"><div className="panel-heading"><div><span className="eyebrow">{selected === TODAY ? "TODAY'S STATUS" : "DAY REPORT"}</span><h2>{new Date(`${selected}T00:00:00`).toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long" })}</h2></div><span className="count-chip">{Math.round((complete / Math.max(1, all.length)) * 100)}% SCORE</span></div><h3>MISSIONS</h3>{activeLog?.tasks.map((item) => <div className={`history-row ${item.done ? "done" : "missed"}`} key={item.title}><span>{item.done ? "✓" : "×"}</span><strong>{item.title}</strong><em>{item.done ? "COMPLETED" : "MISSED"}</em></div>)}<h3>HABITS</h3>{activeLog?.habits.map((item) => <div className={`history-row ${item.done ? "done" : "missed"}`} key={item.title}><span>{item.done ? "✓" : "×"}</span><strong>{item.title}</strong><em>{item.done ? "COMPLETED" : "MISSED"}</em></div>)}</article></section>
+    <section className="history-layout"><article className="game-panel history-calendar"><div className="panel-heading"><div><span className="eyebrow">RECENT DAYS</span><h2>Activity timeline</h2></div></div><div className="day-grid">{logs.map((log) => { const entries = [...log.tasks, ...log.habits]; const score = entries.filter((x) => x.done).length; return <button key={log.date} className={selectedDate === log.date ? "active" : ""} onClick={() => setSelected(log.date)}><time>{new Date(`${log.date}T00:00:00`).toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}</time><b>{score}/{entries.length}</b><i style={{ width: `${entries.length ? score / entries.length * 100 : 0}%` }}/><span>{score === entries.length ? "ALL CLEAR" : `${entries.length - score} MISSED`}</span></button>; })}</div></article>
+      <article className="game-panel history-detail"><div className="panel-heading"><div><span className="eyebrow">{selectedDate === activeDate ? "TODAY'S STATUS" : "DAY REPORT"}</span><h2>{selectedDate ? new Date(`${selectedDate}T00:00:00`).toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long" }) : "Syncing date…"}</h2></div><span className="count-chip">{Math.round((complete / Math.max(1, all.length)) * 100)}% SCORE</span></div><h3>MISSIONS</h3>{activeLog?.tasks.map((item) => <div className={`history-row ${item.done ? "done" : "missed"}`} key={item.title}><span>{item.done ? "✓" : "×"}</span><strong>{item.title}</strong><em>{item.done ? "COMPLETED" : "MISSED"}</em></div>)}<h3>HABITS</h3>{activeLog?.habits.map((item) => <div className={`history-row ${item.done ? "done" : "missed"}`} key={item.title}><span>{item.done ? "✓" : "×"}</span><strong>{item.title}</strong><em>{item.done ? "COMPLETED" : "MISSED"}</em></div>)}</article></section>
   </>;
 }
 
-function SettingsModule({ state, setState, account, logout, notify }: { state: LifeQuestState; setState: React.Dispatch<React.SetStateAction<LifeQuestState>>; account: AppAccount | null; logout: () => void; notify: (message: string) => void }) {
+function SettingsModule({ state, setState, account, logout, notify, today }: { state: LifeQuestState; setState: React.Dispatch<React.SetStateAction<LifeQuestState>>; account: AppAccount | null; logout: () => void; notify: (message: string) => void; today: string }) {
   const settings = state.settings || DEFAULT_STATE.settings;
   const resetToday = () => { if (!window.confirm("Reset all task and habit checkmarks for today?")) return; setState((s) => ({ ...s, tasks: s.tasks.map((x) => ({ ...x, done: false })), habits: s.habits.map((x) => ({ ...x, done: false })), revisions: s.revisions.map((x) => ({ ...x, done: false })), changeHabits: s.changeHabits.map((x) => ({ ...x, done: false })) })); notify("Today's mission status reset"); };
-  const resetJourney = () => { if (!window.confirm("Restart the 90-day journey from Day 1? Your custom tasks and expenses will stay.")) return; setState((s) => ({ ...s, profile: { ...s.profile, day: 1, xp: 0, coins: 0, streak: 0 } })); notify("90-day campaign restarted"); };
-  const factoryReset = () => { if (!window.confirm("Factory reset everything? This permanently clears this profile's custom data.")) return; setState({ ...DEFAULT_STATE, profile: { ...DEFAULT_STATE.profile, name: state.profile.name, day: 1, xp: 0, coins: 0, streak: 0 }, history: [] }); notify("App returned to default settings"); };
+  const resetJourney = () => { if (!window.confirm("Restart the 90-day journey from Day 1? Your custom tasks and expenses will stay.")) return; setState((s) => ({ ...s, profile: { ...s.profile, day: 1, xp: 0, coins: 0, streak: 0, journeyStartedOn: today || s.profile.journeyStartedOn, lastActiveDate: today || s.profile.lastActiveDate } })); notify("90-day campaign restarted"); };
+  const factoryReset = () => { if (!window.confirm("Factory reset everything? This permanently clears this profile's custom data.")) return; setState({ ...DEFAULT_STATE, profile: { ...DEFAULT_STATE.profile, name: state.profile.name, day: 1, xp: 0, coins: 0, streak: 0, journeyStartedOn: today || undefined, lastActiveDate: today || undefined }, history: [] }); notify("App returned to default settings"); };
   const deleteAccount = async () => { if (!window.confirm("Permanently delete your account and all LifeQuest progress? This cannot be undone.")) return; const confirmation = window.prompt('Type DELETE to confirm'); if (confirmation !== "DELETE") return; const response = await fetch("/api/auth/account", { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirmation }) }); if (!response.ok) { notify("Account could not be deleted"); return; } await logout(); };
   const update = (patch: Partial<LifeQuestState["settings"]>) => setState((s) => ({ ...s, settings: { ...(s.settings || DEFAULT_STATE.settings), ...patch } }));
   return <><ModuleHeader code="CONTROL ROOM // PERSONALIZE" title="Make LifeQuest yours." text="Customize the game experience, daily targets, rewards and reset only the data you choose." stat="PLAYER SETTINGS" />
-    <section className="settings-grid"><article className="game-panel setting-card"><span className="eyebrow">PLAYER PROFILE</span><h2>{state.profile.name}</h2><p>{account?.method === "google" ? "Gmail OTP profile" : "Mobile OTP profile"} · {account?.label}</p><label>Display name<input value={state.profile.name} onChange={(e) => setState((s) => ({ ...s, profile: { ...s.profile, name: e.target.value } }))}/></label><button className="secondary-btn" onClick={logout}>LOG OUT</button></article>
+    <section className="settings-grid"><article className="game-panel setting-card"><span className="eyebrow">PLAYER PROFILE</span><h2>{state.profile.name}</h2><p>{account?.method === "google" ? "Gmail OTP profile" : "Mobile OTP profile"} · {account?.label}</p><p>90-day journey started: {state.profile.journeyStartedOn ? dateFromKey(state.profile.journeyStartedOn).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" }) : "Syncing…"}</p><label>Display name<input value={state.profile.name} onChange={(e) => setState((s) => ({ ...s, profile: { ...s.profile, name: e.target.value } }))}/></label><button className="secondary-btn" onClick={logout}>LOG OUT</button></article>
       <article className="game-panel setting-card"><span className="eyebrow">GAME EXPERIENCE</span><h2>Interface loadout</h2><label>Theme<select value={settings.theme} onChange={(e) => update({ theme: e.target.value as LifeQuestState["settings"]["theme"] })}><option value="cyber">Cyber Cyan</option><option value="royal">Royal Purple</option><option value="stealth">Stealth Red</option></select></label><div className="setting-toggle"><span><strong>Compact dashboard</strong><small>Fit more missions on screen</small></span><button className={`toggle ${settings.compact ? "on" : ""}`} onClick={() => update({ compact: !settings.compact })}><i/></button></div><div className="setting-toggle"><span><strong>Sound effects</strong><small>Reward and mission feedback</small></span><button className={`toggle ${settings.sound ? "on" : ""}`} onClick={() => update({ sound: !settings.sound })}><i/></button></div></article>
       <article className="game-panel setting-card"><span className="eyebrow">GAME RULES</span><h2>Your difficulty</h2><label>Daily priority mission goal<input type="number" min="1" max="12" value={settings.dailyGoal} onChange={(e) => update({ dailyGoal: Number(e.target.value) })}/></label><label>Coin reward multiplier<select value={settings.coinMultiplier} onChange={(e) => update({ coinMultiplier: Number(e.target.value) })}><option value={0.5}>0.5× Hard</option><option value={1}>1× Balanced</option><option value={1.5}>1.5× Boosted</option></select></label><p className="info-chip">You can also customize habits, missions, rewards, alarms and gym days inside their own modules.</p></article>
-      <article className="game-panel setting-card danger-zone"><span className="eyebrow">RESET ZONE</span><h2>Reset controls</h2><button onClick={resetToday}>RESET TODAY'S CHECKMARKS <small>Keep all tasks, clear completion only</small></button><button onClick={resetJourney}>RESTART 90-DAY JOURNEY <small>Keep personal plans and expenses</small></button><button className="danger" onClick={factoryReset}>FACTORY RESET APP <small>Clear all customized profile data</small></button><button className="danger" onClick={() => void deleteAccount()}>DELETE ACCOUNT <small>Permanently erase profile, progress and sessions</small></button></article></section>
+      <article className="game-panel setting-card danger-zone"><span className="eyebrow">RESET ZONE</span><h2>Reset controls</h2><button onClick={resetToday}>RESET TODAY&apos;S CHECKMARKS <small>Keep all tasks, clear completion only</small></button><button onClick={resetJourney}>RESTART 90-DAY JOURNEY <small>Keep personal plans and expenses</small></button><button className="danger" onClick={factoryReset}>FACTORY RESET APP <small>Clear all customized profile data</small></button><button className="danger" onClick={() => void deleteAccount()}>DELETE ACCOUNT <small>Permanently erase profile, progress and sessions</small></button></article></section>
   </>;
 }
 
-function Overview({ state, expenseTotal, completedTasks, recommendations, toggleTask, toggleHabit, go, openAssistant }: { state: LifeQuestState; expenseTotal: number; completedTasks: number; recommendations: Recommendation[]; toggleTask: (id: number) => void; toggleHabit: (id: number) => void; go: (tab: Tab) => void; openAssistant: () => void }) {
+function Overview({ state, expenseTotal, completedTasks, recommendations, toggleTask, toggleHabit, go, openAssistant, currentDayCode, clock }: { state: LifeQuestState; expenseTotal: number; completedTasks: number; recommendations: Recommendation[]; toggleTask: (id: number) => void; toggleHabit: (id: number) => void; go: (tab: Tab) => void; openAssistant: () => void; currentDayCode: string; clock: Date | null }) {
   const modules: [string, string, string, string, Tab][] = [
-    ["90D", "Life Reset", `Day ${state.profile.day} · Phase I`, "#8b5cf6", "reset"],
+    ["90D", "Life Reset", `Day ${state.profile.day} · Phase ${state.profile.day <= 22 ? "I" : state.profile.day <= 66 ? "II" : "III"}`, "#8b5cf6", "reset"],
     ["AI", "Smart Planner", `${state.tasks.length} missions today`, "#31d7ff", "planner"],
-    ["GYM", "Gym Planner", `${state.workouts.find((day) => day.day === "WED")?.muscles}`, "#caff4a", "gym"],
+    ["GYM", "Gym Planner", `${state.workouts.find((day) => day.day === currentDayCode)?.muscles || "Today's workout"}`, "#caff4a", "gym"],
     ["₹", "Expenses", `${formatMoney(Math.max(0, state.expenses.budget - expenseTotal))} left`, "#ffb84d", "expenses"],
   ];
   const xpLevel = Math.floor(state.profile.xp / 1000) + 1;
   const xpPercent = (state.profile.xp % 1000) / 10;
-  const motivation = dailyQuote();
+  const motivation = clock ? dailyQuote(clock) : DAILY_QUOTES[0];
   return <>
     <section className="hero-panel game-panel">
       <div className="arena-sun"/><div className="arena-silhouette"/><div className="arena-grid"/>
@@ -409,10 +550,12 @@ function ModuleHeader({ code, title, text, stat }: { code: string; title: string
 
 function ResetModule({ state, setState, award }: { state: LifeQuestState; setState: React.Dispatch<React.SetStateAction<LifeQuestState>>; award: (xp: number, coins: number, message: string) => void }) {
   const phases = [{ name: "Ignition", range: "Days 1–22", desc: "Stabilize sleep, environment and basic routines." }, { name: "Momentum", range: "Days 23–66", desc: "Increase deep work and strengthen identity-based habits." }, { name: "Expansion", range: "Days 67–90", desc: "Raise difficulty, lead yourself and lock in the new standard." }];
+  const phaseStarts = [1, 23, 67];
+  const phaseEnds = [22, 66, 90];
   return <>
     <ModuleHeader code="90-DAY CAMPAIGN // LIFE RESET" title="Rebuild. Level by level." text="Your reset adapts across three phases, with reflection checkpoints and real rewards." stat={`DAY ${state.profile.day} / 90`} />
-    <div className="phase-grid">{phases.map((phase, index) => { const active = state.profile.day > index * 22 && state.profile.day <= (index === 1 ? 66 : index === 2 ? 90 : 22); return <article className={`game-panel phase-card ${active ? "current" : ""}`} key={phase.name}><span>PHASE 0{index + 1}</span><h2>{phase.name}</h2><b>{phase.range}</b><p>{phase.desc}</p><div className="phase-bar"><i style={{ width: index === 0 ? "100%" : index === 1 ? `${Math.min(100, ((state.profile.day - 22) / 44) * 100)}%` : "0%" }}/></div></article>; })}</div>
-    <section className="game-panel timeline-panel"><div className="panel-heading"><div><span className="eyebrow">CAMPAIGN MAP</span><h2>90-day progression</h2></div><span className="count-chip">NEXT LEVEL IN {10 - (state.profile.day % 10)} DAYS</span></div><div className="day-grid">{Array.from({ length: 90 }, (_, i) => i + 1).map((day) => <button key={day} className={day < state.profile.day ? "past" : day === state.profile.day ? "today" : day % 10 === 0 ? "boss" : "future"} title={`Day ${day}`}>{day % 10 === 0 ? `L${day / 10}` : day}</button>)}</div></section>
+    <div className="phase-grid">{phases.map((phase, index) => { const start = phaseStarts[index], end = phaseEnds[index]; const active = state.profile.day >= start && state.profile.day <= end; const progress = state.profile.day < start ? 0 : state.profile.day > end ? 100 : ((state.profile.day - start + 1) / (end - start + 1)) * 100; return <article className={`game-panel phase-card ${active ? "current" : ""}`} key={phase.name}><span>PHASE 0{index + 1}</span><h2>{phase.name}</h2><b>{phase.range}</b><p>{phase.desc}</p><div className="phase-bar"><i style={{ width: `${Math.min(100, progress)}%` }}/></div></article>; })}</div>
+    <section className="game-panel timeline-panel"><div className="panel-heading"><div><span className="eyebrow">CAMPAIGN MAP</span><h2>90-day progression</h2></div><span className="count-chip">{state.profile.day >= 90 ? "CAMPAIGN COMPLETE" : `NEXT LEVEL IN ${10 - (state.profile.day % 10)} DAYS`}</span></div><div className="day-grid">{Array.from({ length: 90 }, (_, i) => i + 1).map((day) => <button key={day} className={day < state.profile.day ? "past" : day === state.profile.day ? "today" : day % 10 === 0 ? "boss" : "future"} title={`Day ${day}`}>{day % 10 === 0 ? `L${day / 10}` : day}</button>)}</div></section>
     <section className="two-column">
       <article className="game-panel form-panel"><span className="eyebrow">MORNING INTENTION</span><h2>Choose today&apos;s win</h2><label>My single most important outcome<textarea value={state.checkin.morning} onChange={(event) => setState((current) => ({ ...current, checkin: { ...current.checkin, morning: event.target.value } }))}/></label><label>Energy level <input type="range" min="1" max="5" value={state.checkin.energy} onChange={(event) => setState((current) => ({ ...current, checkin: { ...current.checkin, energy: Number(event.target.value) } }))}/><span className="range-value">{state.checkin.energy} / 5</span></label><button className="primary-btn" onClick={() => award(30, 10, "Morning intention locked")}>LOCK INTENTION</button></article>
       <article className="game-panel form-panel"><span className="eyebrow">EVENING REFLECTION</span><h2>Save the lesson</h2><label>What worked, and what will I improve?<textarea placeholder="Write an honest two-minute reflection..." value={state.checkin.evening} onChange={(event) => setState((current) => ({ ...current, checkin: { ...current.checkin, evening: event.target.value } }))}/></label><button className="secondary-btn" onClick={() => award(40, 15, "Reflection saved")}>COMPLETE DAILY CHECK-IN</button></article>
@@ -435,18 +578,19 @@ function PlannerModule({ state, setState, toggleTask, toggleHabit, notify }: { s
   </>;
 }
 
-function RevisionModule({ state, setState, award }: { state: LifeQuestState; setState: React.Dispatch<React.SetStateAction<LifeQuestState>>; award: (xp: number, coins: number, message: string) => void }) {
+function RevisionModule({ state, setState, award, today }: { state: LifeQuestState; setState: React.Dispatch<React.SetStateAction<LifeQuestState>>; award: (xp: number, coins: number, message: string) => void; today: string }) {
   const [source, setSource] = useState({ title: "", url: "" });
   const [quiz, setQuiz] = useState<Revision | null>(null);
+  const dueToday = state.revisions.filter((item) => { const due = today ? revisionDate(item, today) : undefined; return !item.done && (due ? due <= today : item.nextReview === "Today"); }).length;
   const questions = quiz ? [{ q: `Which idea is most central to ${quiz.title}?`, options: ["Active recall", "Passive rereading", "Skipping practice", "Memorizing titles"] }, { q: "Which revision interval comes after Day 7?", options: ["Day 30", "Day 8", "Day 10", "Day 60"] }] : [];
   return <>
-    <ModuleHeader code="SPACED REPETITION // KNOWLEDGE ARENA" title="Turn content into memory." text="Save a learning link, generate a quick quiz, and fight forgetting on Days 1, 3, 7 and 30." stat={`${state.revisions.filter((item) => item.nextReview === "Today").length} DUE TODAY`} />
+    <ModuleHeader code="SPACED REPETITION // KNOWLEDGE ARENA" title="Turn content into memory." text="Save a learning link, generate a quick quiz, and fight forgetting on Days 1, 3, 7 and 30." stat={`${dueToday} DUE TODAY`} />
     <section className="revision-layout">
-      <article className="game-panel revision-list"><div className="panel-heading"><div><span className="eyebrow">ACTIVE DECKS</span><h2>Revision quests</h2></div><span className="count-chip">LEVELS 1–9</span></div>{state.revisions.map((item) => <div className="revision-card" key={item.id}><div className="deck-level">L{item.level}</div><div className="revision-main"><strong>{item.title}</strong><span>Next review: <b>{item.nextReview}</b></span><div className="mastery"><i style={{ width: `${item.mastery}%` }}/></div></div><em>{item.mastery}%</em><button onClick={() => setQuiz(item)}>START QUIZ</button></div>)}</article>
-      <article className="game-panel form-panel"><span className="eyebrow">IMPORT KNOWLEDGE</span><h2>Add learning source</h2><label>Topic name<input value={source.title} onChange={(event) => setSource({ ...source, title: event.target.value })} placeholder="e.g. Decision Trees"/></label><label>YouTube / course link<input value={source.url} onChange={(event) => setSource({ ...source, url: event.target.value })} placeholder="Paste URL"/></label><div className="info-chip">AI quiz generation uses the source title in this prototype. Connect a transcript service for full video analysis.</div><button className="primary-btn" onClick={() => { if (!source.title || !source.url) return; setState((current) => ({ ...current, revisions: [...current.revisions, { id: nextId(), title: source.title, url: source.url, nextReview: "Today", mastery: 0, level: 1, done: false }] })); setSource({ title: "", url: "" }); }}>CREATE REVISION DECK</button></article>
+      <article className="game-panel revision-list"><div className="panel-heading"><div><span className="eyebrow">ACTIVE DECKS</span><h2>Revision quests</h2></div><span className="count-chip">LEVELS 1–9</span></div>{state.revisions.map((item) => <div className="revision-card" key={item.id}><div className="deck-level">L{item.level}</div><div className="revision-main"><strong>{item.title}</strong><span>Next review: <b>{today ? revisionLabel(item, today) : item.nextReview}</b></span><div className="mastery"><i style={{ width: `${item.mastery}%` }}/></div></div><em>{item.mastery}%</em><button onClick={() => setQuiz(item)}>START QUIZ</button></div>)}</article>
+      <article className="game-panel form-panel"><span className="eyebrow">IMPORT KNOWLEDGE</span><h2>Add learning source</h2><label>Topic name<input value={source.title} onChange={(event) => setSource({ ...source, title: event.target.value })} placeholder="e.g. Decision Trees"/></label><label>YouTube / course link<input value={source.url} onChange={(event) => setSource({ ...source, url: event.target.value })} placeholder="Paste URL"/></label><div className="info-chip">AI quiz generation uses the source title in this prototype. Connect a transcript service for full video analysis.</div><button className="primary-btn" onClick={() => { if (!source.title || !source.url) return; setState((current) => ({ ...current, revisions: [...current.revisions, { id: nextId(), title: source.title, url: source.url, nextReview: "Today", reviewDate: today || undefined, mastery: 0, level: 1, done: false }] })); setSource({ title: "", url: "" }); }}>CREATE REVISION DECK</button></article>
     </section>
     <section className="spaced-strip">{[1, 3, 7, 30].map((day, index) => <div key={day}><span>CHECKPOINT 0{index + 1}</span><b>DAY {day}</b><small>{["Quick recall", "Strengthen", "Consolidate", "Long-term lock"][index]}</small></div>)}</section>
-    {quiz && <div className="modal-backdrop"><section className="quiz-modal game-panel"><button className="modal-close" onClick={() => setQuiz(null)}>×</button><span className="eyebrow">AI QUIZ // {quiz.title}</span><h2>Knowledge battle</h2>{questions.map((question, index) => <div className="quiz-question" key={question.q}><strong>{index + 1}. {question.q}</strong>{question.options.map((option) => <label key={option}><input type="radio" name={`q${index}`}/><span>{option}</span></label>)}</div>)}<button className="glow-btn full" onClick={() => { setQuiz(null); setState((current) => ({ ...current, revisions: current.revisions.map((item) => item.id === quiz.id ? { ...item, mastery: Math.min(100, item.mastery + 8), nextReview: "In 3 days" } : item) })); award(80, 30, "Revision battle cleared"); }}>SUBMIT & CLAIM REWARD</button></section></div>}
+    {quiz && <div className="modal-backdrop"><section className="quiz-modal game-panel"><button className="modal-close" onClick={() => setQuiz(null)}>×</button><span className="eyebrow">AI QUIZ // {quiz.title}</span><h2>Knowledge battle</h2>{questions.map((question, index) => <div className="quiz-question" key={question.q}><strong>{index + 1}. {question.q}</strong>{question.options.map((option) => <label key={option}><input type="radio" name={`q${index}`}/><span>{option}</span></label>)}</div>)}<button className="glow-btn full" onClick={() => { setQuiz(null); setState((current) => ({ ...current, revisions: current.revisions.map((item) => item.id === quiz.id ? { ...item, mastery: Math.min(100, item.mastery + 8), nextReview: "In 3 days", reviewDate: today ? shiftDateKey(today, 3) : item.reviewDate, done: true } : item) })); award(80, 30, "Revision battle cleared"); }}>SUBMIT & CLAIM REWARD</button></section></div>}
   </>;
 }
 
@@ -463,14 +607,15 @@ function AlarmModule({ state, setState, notify }: { state: LifeQuestState; setSt
   </>;
 }
 
-function GymModule({ state, setState, award }: { state: LifeQuestState; setState: React.Dispatch<React.SetStateAction<LifeQuestState>>; award: (xp: number, coins: number, message: string) => void }) {
-  const [selectedDay, setSelectedDay] = useState("WED");
+function GymModule({ state, setState, award, currentDayCode }: { state: LifeQuestState; setState: React.Dispatch<React.SetStateAction<LifeQuestState>>; award: (xp: number, coins: number, message: string) => void; currentDayCode: string }) {
+  const [manualDay, setManualDay] = useState<string | null>(null);
+  const selectedDay = manualDay || currentDayCode;
   const [draft, setDraft] = useState({ muscles: "", exercise: "", sets: 3, reps: "10–12" });
   const workout = state.workouts.find((item) => item.day === selectedDay)!;
   const updateWorkout = (updater: (item: WorkoutDay) => WorkoutDay) => setState((current) => ({ ...current, workouts: current.workouts.map((item) => item.day === selectedDay ? updater(item) : item) }));
   return <>
     <ModuleHeader code="TRAINING CAMPAIGN // BODY STATS" title="Build your weekly split." text="Choose what muscles to train each day, track sets and reps, and gain XP after every completed workout." stat={`${state.workouts.filter((day) => day.complete).length} / 7 DAYS`} />
-    <section className="week-strip">{state.workouts.map((day) => <button key={day.day} className={`${day.day === selectedDay ? "active" : ""} ${day.complete ? "complete" : ""}`} onClick={() => setSelectedDay(day.day)}><span>{day.day}</span><b>{day.muscles}</b><i>{day.complete ? "✓ CLEARED" : "PLANNED"}</i></button>)}</section>
+    <section className="week-strip">{state.workouts.map((day) => <button key={day.day} className={`${day.day === selectedDay ? "active" : ""} ${day.complete ? "complete" : ""}`} onClick={() => setManualDay(day.day)}><span>{day.day}</span><b>{day.muscles}</b><i>{day.complete ? "✓ CLEARED" : "PLANNED"}</i></button>)}</section>
     <section className="gym-layout">
       <article className="game-panel workout-panel"><div className="panel-heading"><div><span className="eyebrow">{selectedDay} LOADOUT</span><h2>{workout.muscles}</h2></div><span className="count-chip">+150 XP</span></div><div className="exercise-table"><div className="table-head"><span>EXERCISE</span><span>SETS</span><span>REPS / TIME</span><span>STATUS</span></div>{workout.exercises.map((exercise) => <button className={exercise.done ? "done" : ""} key={exercise.id} onClick={() => updateWorkout((item) => ({ ...item, exercises: item.exercises.map((entry) => entry.id === exercise.id ? { ...entry, done: !entry.done } : entry) }))}><strong>{exercise.name}</strong><span>{exercise.sets}</span><span>{exercise.reps}</span><em>{exercise.done ? "✓ DONE" : "MARK DONE"}</em></button>)}</div><button className="glow-btn full" disabled={workout.complete} onClick={() => { updateWorkout((item) => ({ ...item, complete: true, exercises: item.exercises.map((entry) => ({ ...entry, done: true })) })); award(150, 50, `${selectedDay} workout cleared`); }}>{workout.complete ? "WORKOUT ALREADY CLEARED" : "COMPLETE WORKOUT"}</button></article>
       <article className="game-panel form-panel"><span className="eyebrow">EDIT {selectedDay}</span><h2>Set muscles & exercise</h2><label>Muscle groups<input placeholder={workout.muscles} value={draft.muscles} onChange={(event) => setDraft({ ...draft, muscles: event.target.value })}/></label><button className="secondary-btn compact" onClick={() => { if (!draft.muscles) return; updateWorkout((item) => ({ ...item, muscles: draft.muscles })); setDraft({ ...draft, muscles: "" }); }}>UPDATE DAY SPLIT</button><div className="divider"/><label>Exercise name<input placeholder="e.g. Dumbbell fly" value={draft.exercise} onChange={(event) => setDraft({ ...draft, exercise: event.target.value })}/></label><div className="form-row"><label>Sets<input type="number" min="1" value={draft.sets} onChange={(event) => setDraft({ ...draft, sets: Number(event.target.value) })}/></label><label>Reps / time<input value={draft.reps} onChange={(event) => setDraft({ ...draft, reps: event.target.value })}/></label></div><button className="primary-btn" onClick={() => { if (!draft.exercise) return; updateWorkout((item) => ({ ...item, exercises: [...item.exercises, { id: nextId(), name: draft.exercise, sets: draft.sets, reps: draft.reps, done: false }] })); setDraft({ ...draft, exercise: "", sets: 3, reps: "10–12" }); }}>ADD EXERCISE</button></article>
@@ -478,16 +623,19 @@ function GymModule({ state, setState, award }: { state: LifeQuestState; setState
   </>;
 }
 
-function ExpenseModule({ state, setState, total, notify }: { state: LifeQuestState; setState: React.Dispatch<React.SetStateAction<LifeQuestState>>; total: number; notify: (message: string) => void }) {
-  const [entry, setEntry] = useState({ title: "", category: "Food", amount: 0, date: TODAY });
+function ExpenseModule({ state, setState, total, notify, today }: { state: LifeQuestState; setState: React.Dispatch<React.SetStateAction<LifeQuestState>>; total: number; notify: (message: string) => void; today: string }) {
+  const [entry, setEntry] = useState({ title: "", category: "Food", amount: 0, date: today });
   const remaining = state.expenses.budget - total;
-  const categories = useMemo(() => state.expenses.items.reduce<Record<string, number>>((acc, item) => ({ ...acc, [item.category]: (acc[item.category] || 0) + item.amount }), {}), [state.expenses.items]);
+  const currentMonthKey = today.slice(0, 7);
+  const currentItems = useMemo(() => state.expenses.items.filter((item) => !currentMonthKey || item.date.startsWith(currentMonthKey)), [state.expenses.items, currentMonthKey]);
+  const categories = useMemo(() => currentItems.reduce<Record<string, number>>((acc, item) => ({ ...acc, [item.category]: (acc[item.category] || 0) + item.amount }), {}), [currentItems]);
+  const currentMonth = today ? dateFromKey(today).toLocaleDateString("en-IN", { month: "long", year: "numeric" }).toUpperCase() : "CURRENT MONTH";
   return <>
-    <ModuleHeader code="CREDIT CONTROL // JULY 2026" title="Command your money." text="Set a monthly budget, store every expense, and protect the coins that matter in real life." stat={`${Math.round((total / state.expenses.budget) * 100)}% USED`} />
-    <section className="finance-stats"><article className="game-panel"><span>MONTHLY BUDGET</span><b>{formatMoney(state.expenses.budget)}</b><input type="number" value={state.expenses.budget} onChange={(event) => setState((current) => ({ ...current, expenses: { ...current.expenses, budget: Number(event.target.value) } }))}/></article><article className="game-panel"><span>TOTAL SPENT</span><b>{formatMoney(total)}</b><small>{state.expenses.items.length} transactions</small></article><article className={`game-panel ${remaining < 0 ? "danger" : ""}`}><span>REMAINING</span><b>{formatMoney(remaining)}</b><small>{remaining >= 0 ? "Budget shield active" : "Budget exceeded"}</small></article></section>
+    <ModuleHeader code={`CREDIT CONTROL // ${currentMonth}`} title="Command your money." text="Set a monthly budget, store every expense, and protect the coins that matter in real life." stat={`${Math.round((total / state.expenses.budget) * 100)}% USED`} />
+    <section className="finance-stats"><article className="game-panel"><span>MONTHLY BUDGET</span><b>{formatMoney(state.expenses.budget)}</b><input type="number" value={state.expenses.budget} onChange={(event) => setState((current) => ({ ...current, expenses: { ...current.expenses, budget: Number(event.target.value) } }))}/></article><article className="game-panel"><span>TOTAL SPENT</span><b>{formatMoney(total)}</b><small>{currentItems.length} transactions</small></article><article className={`game-panel ${remaining < 0 ? "danger" : ""}`}><span>REMAINING</span><b>{formatMoney(remaining)}</b><small>{remaining >= 0 ? "Budget shield active" : "Budget exceeded"}</small></article></section>
     <section className="expense-layout">
-      <article className="game-panel expense-log"><div className="panel-heading"><div><span className="eyebrow">TRANSACTION LOG</span><h2>Recent expenses</h2></div></div><div className="expense-table">{state.expenses.items.slice().reverse().map((item) => <div key={item.id}><span className="expense-icon">{item.category === "Food" ? "🍲" : item.category === "Fitness" ? "◆" : item.category === "Housing" ? "⌂" : "₹"}</span><div><strong>{item.title}</strong><small>{item.category} · {item.date}</small></div><b>-{formatMoney(item.amount)}</b><button onClick={() => setState((current) => ({ ...current, expenses: { ...current.expenses, items: current.expenses.items.filter((entryItem) => entryItem.id !== item.id) } }))}>×</button></div>)}</div></article>
-      <article className="game-panel form-panel"><span className="eyebrow">LOG EXPENSE</span><h2>New transaction</h2><label>Description<input value={entry.title} onChange={(event) => setEntry({ ...entry, title: event.target.value })} placeholder="What did you spend on?"/></label><div className="form-row"><label>Amount<input type="number" min="0" value={entry.amount || ""} onChange={(event) => setEntry({ ...entry, amount: Number(event.target.value) })}/></label><label>Category<select value={entry.category} onChange={(event) => setEntry({ ...entry, category: event.target.value })}><option>Food</option><option>Housing</option><option>Fitness</option><option>Education</option><option>Travel</option><option>Fun</option><option>Other</option></select></label></div><label>Date<input type="date" value={entry.date} onChange={(event) => setEntry({ ...entry, date: event.target.value })}/></label><button className="primary-btn" onClick={() => { if (!entry.title || entry.amount <= 0) return; setState((current) => ({ ...current, expenses: { ...current.expenses, items: [...current.expenses.items, { ...entry, id: nextId() }] } })); setEntry({ title: "", category: "Food", amount: 0, date: TODAY }); notify("Expense stored in monthly ledger"); }}>STORE EXPENSE</button><div className="category-mini">{Object.entries(categories).map(([category, amount]) => <div key={category}><span>{category}</span><i><b style={{ width: `${Math.min(100, (amount / total) * 100)}%` }}/></i><em>{formatMoney(amount)}</em></div>)}</div></article>
+      <article className="game-panel expense-log"><div className="panel-heading"><div><span className="eyebrow">TRANSACTION LOG</span><h2>This month&apos;s expenses</h2></div></div><div className="expense-table">{currentItems.slice().reverse().map((item) => <div key={item.id}><span className="expense-icon">{item.category === "Food" ? "🍲" : item.category === "Fitness" ? "◆" : item.category === "Housing" ? "⌂" : "₹"}</span><div><strong>{item.title}</strong><small>{item.category} · {item.date}</small></div><b>-{formatMoney(item.amount)}</b><button onClick={() => setState((current) => ({ ...current, expenses: { ...current.expenses, items: current.expenses.items.filter((entryItem) => entryItem.id !== item.id) } }))}>×</button></div>)}</div></article>
+      <article className="game-panel form-panel"><span className="eyebrow">LOG EXPENSE</span><h2>New transaction</h2><label>Description<input value={entry.title} onChange={(event) => setEntry({ ...entry, title: event.target.value })} placeholder="What did you spend on?"/></label><div className="form-row"><label>Amount<input type="number" min="0" value={entry.amount || ""} onChange={(event) => setEntry({ ...entry, amount: Number(event.target.value) })}/></label><label>Category<select value={entry.category} onChange={(event) => setEntry({ ...entry, category: event.target.value })}><option>Food</option><option>Housing</option><option>Fitness</option><option>Education</option><option>Travel</option><option>Fun</option><option>Other</option></select></label></div><label>Date<input type="date" value={entry.date} onChange={(event) => setEntry({ ...entry, date: event.target.value })}/></label><button className="primary-btn" onClick={() => { if (!entry.title || entry.amount <= 0) return; setState((current) => ({ ...current, expenses: { ...current.expenses, items: [...current.expenses.items, { ...entry, id: nextId() }] } })); setEntry({ title: "", category: "Food", amount: 0, date: today }); notify("Expense stored in monthly ledger"); }}>STORE EXPENSE</button><div className="category-mini">{Object.entries(categories).map(([category, amount]) => <div key={category}><span>{category}</span><i><b style={{ width: `${Math.min(100, (amount / total) * 100)}%` }}/></i><em>{formatMoney(amount)}</em></div>)}</div></article>
     </section>
   </>;
 }

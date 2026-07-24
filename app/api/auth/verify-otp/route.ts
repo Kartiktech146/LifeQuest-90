@@ -16,6 +16,6 @@ export async function POST(request: Request) {
     let [user] = await db.select().from(users).where(eq(users.destination, challenge.destination)).limit(1);
     if (!user) { user = { id: crypto.randomUUID(), name: name?.trim().slice(0, 60) || "Player", channel: challenge.channel, destination: challenge.destination, createdAt: new Date().toISOString() }; await db.insert(users).values(user); }
     const token = await createSession(user.id);
-    return Response.json({ user: { id: user.id, name: user.name, method: user.channel === "email" ? "google" : "mobile", label: user.destination } }, { headers: { "set-cookie": sessionCookie(token) } });
+    return Response.json({ user: { id: user.id, name: user.name, method: user.channel === "email" ? "google" : "mobile", label: user.destination, createdAt: user.createdAt } }, { headers: { "set-cookie": sessionCookie(token) } });
   } catch (error) { return Response.json({ error: error instanceof Error ? error.message : "VERIFY_FAILED" }, { status: 500 }); }
 }

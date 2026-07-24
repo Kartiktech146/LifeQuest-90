@@ -33,7 +33,7 @@ export async function createSession(userId: string) {
 export async function currentUser(request: Request) {
   const token = getCookie(request, SESSION_COOKIE); if (!token) return null;
   const db = await getDb();
-  const [row] = await db.select({ id: users.id, name: users.name, channel: users.channel, destination: users.destination })
+  const [row] = await db.select({ id: users.id, name: users.name, channel: users.channel, destination: users.destination, createdAt: users.createdAt })
     .from(sessions).innerJoin(users, eq(sessions.userId, users.id))
     .where(and(eq(sessions.tokenHash, await sha256(token)), gt(sessions.expiresAt, Date.now()))).limit(1);
   return row ?? null;
