@@ -376,15 +376,9 @@ export default function Home() {
       setAssistantMessages((current) => [...current, { role: "ai", text: payload.answer! }]);
     } catch (error) {
       const status = error instanceof Error ? error.message : "ASSISTANT_FAILED";
-      const errorMessages: Record<string, string> = {
-        AI_NOT_CONFIGURED: "Quest AI is not configured yet. Add GROQ_API_KEY to the private server environment, then restart or redeploy the app.",
-        AI_KEY_INVALID: "The AI API key is invalid or revoked. Create a new Groq key, save it in .env.local, and restart the app.",
-        AI_RATE_LIMITED: "The free AI limit has been reached for now. Wait for the Groq limit to reset, then try again.",
-        AI_MODEL_UNAVAILABLE: "The configured AI model is unavailable. Set GROQ_MODEL=openai/gpt-oss-120b and restart the app.",
-        EMPTY_AI_RESPONSE: "Quest AI received an empty response. Please send the message again.",
-      };
-      const text = errorMessages[status]
-        || "Quest AI could not reach its digital brain right now. Check your internet connection and server terminal, then try again.";
+      const text = status === "AI_NOT_CONFIGURED"
+        ? "Quest AI is not configured yet. Add OPENAI_API_KEY to the private server environment, then restart or redeploy the app."
+        : "Quest AI could not reach its digital brain right now. Please try again in a moment.";
       setAssistantMessages((current) => [...current, { role: "ai", text }]);
     } finally {
       setAssistantThinking(false);
