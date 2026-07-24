@@ -15,7 +15,9 @@ npm ci
 cp .env.example .env.local
 ```
 
-4. Open `.env.local` and fill the values. Never upload this file to GitHub.
+4. Open `.env.local` and fill the values. For the free Quest AI provider, add
+   `GROQ_API_KEY` and keep `GROQ_MODEL=openai/gpt-oss-120b`. Never upload this
+   file to GitHub.
 5. Start the app:
 
 ```bash
