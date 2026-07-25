@@ -1,6 +1,6 @@
 "use client";
 
-import { CSSProperties, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Tab = "overview" | "reset" | "planner" | "revision" | "alarm" | "gym" | "expenses" | "rewards" | "change" | "history" | "settings";
 type Task = { id: number; title: string; duration: number; priority: "High" | "Medium" | "Low"; start: string; done: boolean; xp: number };
@@ -8,7 +8,7 @@ type Habit = { id: number; name: string; streak: number; done: boolean; reward: 
 type Revision = { id: number; title: string; url: string; nextReview: string; reviewDate?: string; mastery: number; level: number; done: boolean };
 type Alarm = { id: number; time: string; label: string; mission: string; enabled: boolean };
 type Expense = { id: number; title: string; category: string; amount: number; date: string };
-type Reward = { id: number; title: string; emoji: string; cost: number; cooldown: string; redeemed: number };
+type Reward = { id: number; title: string; emoji: string; cost: number; cooldown: string; redeemed: number; lastRedeemedOn?: string };
 type StoreItem = { id: string; name: string; icon: string; kind: "theme" | "sticker" | "badge" | "effect"; cost: number; rarity: "COMMON" | "RARE" | "EPIC" | "LEGENDARY"; description: string; theme?: "cyber" | "royal" | "stealth" };
 type Exercise = { id: number; name: string; sets: number; reps: string; done: boolean };
 type WorkoutDay = { day: string; muscles: string; exercises: Exercise[]; complete: boolean };
@@ -17,6 +17,7 @@ type AssistantMessage = { role: "ai" | "user"; text: string };
 type Recommendation = { code: string; title: string; detail: string; action: string; tab: Tab; tone: "cyan" | "lime" | "amber" | "purple" };
 type DayLog = { date: string; tasks: { title: string; done: boolean }[]; habits: { title: string; done: boolean }[] };
 type AppAccount = { id: string; name: string; method: "mobile" | "google"; label: string; createdAt?: string };
+type AlarmPermission = NotificationPermission | "unsupported";
 
 type LifeQuestState = {
   profile: {
@@ -38,7 +39,7 @@ type LifeQuestState = {
   store?: { owned: string[]; equipped: Partial<Record<StoreItem["kind"], string>> };
   workouts: WorkoutDay[];
   changeHabits: ChangeHabit[];
-  checkin: { morning: string; evening: string; energy: number };
+  checkin: { morning: string; evening: string; energy: number; morningClaimedOn?: string; eveningClaimedOn?: string };
   settings: { theme: "cyber" | "royal" | "stealth"; compact: boolean; sound: boolean; dailyGoal: number; coinMultiplier: number };
   history: DayLog[];
 };
@@ -139,64 +140,92 @@ function syncStateToDate(current: LifeQuestState, today: string, accountStartedO
   };
 }
 
-const DEFAULT_STATE: LifeQuestState = {
-  profile: { name: "Kartik", day: 1, xp: 2480, coins: 1280, streak: 12, focusMinutes: 135 },
-  tasks: [
-    { id: 1, title: "Deep work: Machine Learning", duration: 90, priority: "High", start: "04:30", done: true, xp: 120 },
-    { id: 2, title: "Morning workout", duration: 45, priority: "High", start: "06:15", done: false, xp: 80 },
-    { id: 3, title: "Revision sprint", duration: 45, priority: "Medium", start: "08:30", done: false, xp: 60 },
-    { id: 4, title: "Build project module", duration: 120, priority: "High", start: "10:00", done: false, xp: 150 },
-  ],
-  habits: [
-    { id: 1, name: "Wake at 4:00 AM", streak: 12, done: true, reward: 25 },
-    { id: 2, name: "No social media AM", streak: 8, done: false, reward: 20 },
-    { id: 3, name: "Read 20 minutes", streak: 5, done: false, reward: 15 },
-    { id: 4, name: "Meditation", streak: 3, done: false, reward: 15 },
-  ],
-  revisions: [
-    { id: 1, title: "Neural Networks — Backpropagation", url: "https://youtube.com/playlist", nextReview: "Today", mastery: 72, level: 3, done: false },
-    { id: 2, title: "SQL Joins & Subqueries", url: "https://youtube.com/watch", nextReview: "Tomorrow", mastery: 48, level: 2, done: false },
-    { id: 3, title: "Python DSA: Backtracking", url: "https://youtube.com/watch", nextReview: "29 Jul", mastery: 86, level: 4, done: true },
-  ],
-  alarms: [
-    { id: 1, time: "04:00", label: "Rise & Conquer", mission: "Math challenge", enabled: true },
-    { id: 2, time: "06:10", label: "Gym briefing", mission: "20 steps", enabled: true },
-  ],
-  expenses: {
-    budget: 15000,
-    items: [
-      { id: 1, title: "Room rent", category: "Housing", amount: 4500, date: "2026-07-01" },
-      { id: 2, title: "Groceries", category: "Food", amount: 1460, date: "2026-07-18" },
-      { id: 3, title: "Gym membership", category: "Fitness", amount: 800, date: "2026-07-05" },
+function createInitialState(name = "Player", startedOn = ""): LifeQuestState {
+  const displayName = name.trim() || "Player";
+  return {
+    profile: { name: displayName, day: 1, xp: 0, coins: 0, streak: 0, focusMinutes: 0, journeyStartedOn: startedOn, lastActiveDate: startedOn },
+    tasks: [
+      { id: 1, title: "Plan today's top priority", duration: 15, priority: "High", start: "08:00", done: false, xp: 30 },
+      { id: 2, title: "Complete one focused work session", duration: 60, priority: "High", start: "10:00", done: false, xp: 80 },
+      { id: 3, title: "Move your body", duration: 30, priority: "Medium", start: "17:00", done: false, xp: 50 },
+      { id: 4, title: "Review the day", duration: 15, priority: "Low", start: "21:00", done: false, xp: 25 },
     ],
-  },
-  rewards: [
-    { id: 1, title: "Play 2 Free Fire matches", emoji: "🎮", cost: 180, cooldown: "Once a day", redeemed: 0 },
-    { id: 2, title: "Eat an ice cream", emoji: "🍦", cost: 240, cooldown: "Once a week", redeemed: 0 },
-    { id: 3, title: "Watch one episode", emoji: "🍿", cost: 200, cooldown: "Once a day", redeemed: 0 },
-    { id: 4, title: "Buy something special", emoji: "🎁", cost: 1200, cooldown: "Level reward", redeemed: 0 },
-  ],
-  store: { owned: ["theme-cyber", "sticker-focus"], equipped: { theme: "theme-cyber", sticker: "sticker-focus" } },
-  workouts: [
-    { day: "MON", muscles: "Chest + Triceps", complete: true, exercises: [{ id: 1, name: "Bench press", sets: 4, reps: "8–10", done: true }, { id: 2, name: "Incline dumbbell press", sets: 3, reps: "10–12", done: true }] },
-    { day: "TUE", muscles: "Back + Biceps", complete: true, exercises: [{ id: 3, name: "Lat pulldown", sets: 4, reps: "10", done: true }] },
-    { day: "WED", muscles: "Legs + Core", complete: false, exercises: [{ id: 4, name: "Squat", sets: 4, reps: "8–10", done: false }, { id: 5, name: "Leg press", sets: 3, reps: "12", done: false }, { id: 6, name: "Plank", sets: 3, reps: "45 sec", done: false }] },
-    { day: "THU", muscles: "Shoulders", complete: false, exercises: [{ id: 7, name: "Overhead press", sets: 4, reps: "8–10", done: false }] },
-    { day: "FRI", muscles: "Upper Body", complete: false, exercises: [{ id: 8, name: "Pull-ups", sets: 4, reps: "AMRAP", done: false }] },
-    { day: "SAT", muscles: "Cardio + Mobility", complete: false, exercises: [{ id: 9, name: "Zone 2 cardio", sets: 1, reps: "30 min", done: false }] },
-    { day: "SUN", muscles: "Recovery", complete: false, exercises: [{ id: 10, name: "Full-body mobility", sets: 1, reps: "20 min", done: false }] },
-  ],
-  changeHabits: [
-    { id: 1, name: "Daily focused study", type: "build", identity: "I am a disciplined learner", cue: "After morning tea", action: "Open notes and study for two minutes", streak: 9, done: false },
-    { id: 2, name: "Late-night scrolling", type: "break", identity: "I protect my sleep", cue: "Phone in bed", action: "Charge phone across the room", streak: 6, done: true },
-  ],
-  checkin: { morning: "Finish my ML lesson and protect my attention.", evening: "", energy: 4 },
-  settings: { theme: "cyber", compact: false, sound: true, dailyGoal: 3, coinMultiplier: 1 },
-  history: [
-    { date: "2026-07-20", tasks: [{ title: "Deep work: Machine Learning", done: true }, { title: "Morning workout", done: true }, { title: "Revision sprint", done: false }], habits: [{ title: "Wake at 4:00 AM", done: true }, { title: "Meditation", done: false }] },
-    { date: "2026-07-21", tasks: [{ title: "Deep work: Machine Learning", done: true }, { title: "Morning workout", done: false }, { title: "Build project module", done: true }], habits: [{ title: "Wake at 4:00 AM", done: true }, { title: "Read 20 minutes", done: true }] },
-  ],
-};
+    habits: [
+      { id: 1, name: "Drink enough water", streak: 0, done: false, reward: 15 },
+      { id: 2, name: "Read for 20 minutes", streak: 0, done: false, reward: 15 },
+      { id: 3, name: "Avoid distractions during focus time", streak: 0, done: false, reward: 20 },
+      { id: 4, name: "Reflect before sleeping", streak: 0, done: false, reward: 15 },
+    ],
+    revisions: [],
+    alarms: [
+      { id: 1, time: "07:00", label: "Start the day", mission: "Open LifeQuest", enabled: false },
+    ],
+    expenses: { budget: 0, items: [] },
+    rewards: [
+      { id: 1, title: "Take a guilt-free break", emoji: "☕", cost: 100, cooldown: "Once a day", redeemed: 0 },
+      { id: 2, title: "Watch one episode", emoji: "🍿", cost: 200, cooldown: "Once a day", redeemed: 0 },
+      { id: 3, title: "Enjoy your favourite snack", emoji: "🍦", cost: 240, cooldown: "Once a week", redeemed: 0 },
+      { id: 4, title: "Buy something special", emoji: "🎁", cost: 1200, cooldown: "Level reward", redeemed: 0 },
+    ],
+    store: { owned: ["theme-cyber", "sticker-focus"], equipped: { theme: "theme-cyber", sticker: "sticker-focus" } },
+    workouts: [
+      { day: "MON", muscles: "Chest + Triceps", complete: false, exercises: [{ id: 1, name: "Bench press", sets: 4, reps: "8–10", done: false }, { id: 2, name: "Incline dumbbell press", sets: 3, reps: "10–12", done: false }] },
+      { day: "TUE", muscles: "Back + Biceps", complete: false, exercises: [{ id: 3, name: "Lat pulldown", sets: 4, reps: "10", done: false }] },
+      { day: "WED", muscles: "Legs + Core", complete: false, exercises: [{ id: 4, name: "Squat", sets: 4, reps: "8–10", done: false }, { id: 5, name: "Leg press", sets: 3, reps: "12", done: false }, { id: 6, name: "Plank", sets: 3, reps: "45 sec", done: false }] },
+      { day: "THU", muscles: "Shoulders", complete: false, exercises: [{ id: 7, name: "Overhead press", sets: 4, reps: "8–10", done: false }] },
+      { day: "FRI", muscles: "Upper Body", complete: false, exercises: [{ id: 8, name: "Pull-ups", sets: 4, reps: "AMRAP", done: false }] },
+      { day: "SAT", muscles: "Cardio + Mobility", complete: false, exercises: [{ id: 9, name: "Zone 2 cardio", sets: 1, reps: "30 min", done: false }] },
+      { day: "SUN", muscles: "Recovery", complete: false, exercises: [{ id: 10, name: "Full-body mobility", sets: 1, reps: "20 min", done: false }] },
+    ],
+    changeHabits: [
+      { id: 1, name: "Daily focused work", type: "build", identity: "I protect time for what matters", cue: "At my planned focus time", action: "Work without distractions for two minutes", streak: 0, done: false },
+      { id: 2, name: "Late-night scrolling", type: "break", identity: "I protect my sleep", cue: "Phone in bed", action: "Charge the phone away from the bed", streak: 0, done: false },
+    ],
+    checkin: { morning: "", evening: "", energy: 3 },
+    settings: { theme: "cyber", compact: false, sound: true, dailyGoal: 2, coinMultiplier: 1 },
+    history: [],
+  };
+}
+
+const DEFAULT_STATE = createInitialState();
+
+function playerLevel(xp: number) {
+  return Math.floor(Math.max(0, xp) / 1000) + 1;
+}
+
+function playerRank(xp: number) {
+  const level = playerLevel(xp);
+  if (level >= 10) return "LEGEND";
+  if (level >= 7) return "COMMANDER";
+  if (level >= 4) return "CHALLENGER";
+  if (level >= 2) return "BUILDER";
+  return "ROOKIE";
+}
+
+function playerInitials(name: string) {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return "P";
+  return words.slice(0, 2).map((word) => word[0]?.toUpperCase()).join("");
+}
+
+function alarmMinutes(time: string) {
+  const [hours, minutes] = time.split(":").map(Number);
+  return (hours * 60) + minutes;
+}
+
+function isAlarmDue(alarm: Alarm, now: Date) {
+  const currentMinutes = (now.getHours() * 60) + now.getMinutes();
+  const elapsed = currentMinutes - alarmMinutes(alarm.time);
+  return alarm.enabled && elapsed >= 0 && elapsed < 5;
+}
+
+function isLegacyDemoState(state: LifeQuestState, account: AppAccount) {
+  const accountLooksLikeKartik = account.name.trim().toLowerCase().startsWith("kartik");
+  return !accountLooksLikeKartik
+    && state.profile?.name === "Kartik"
+    && state.tasks?.some((task) => task.title === "Deep work: Machine Learning")
+    && state.expenses?.items?.some((item) => item.title === "Room rent");
+}
 
 const NAV: { id: Tab; icon: string; label: string }[] = [
   { id: "overview", icon: "⌂", label: "Command Center" },
@@ -271,13 +300,17 @@ function getRecommendations(state: LifeQuestState, currentDayCode: string, today
 
 export default function Home() {
   const [active, setActive] = useState<Tab>("overview");
-  const [state, setState] = useState<LifeQuestState>(DEFAULT_STATE);
+  const [state, setState] = useState<LifeQuestState>(() => createInitialState());
   const [account, setAccount] = useState<AppAccount | null>(null);
   const [clock, setClock] = useState<Date | null>(null);
   const [sessionLoading, setSessionLoading] = useState(true);
   const [hydrated, setHydrated] = useState(false);
   const [syncStatus, setSyncStatus] = useState<"loading" | "saved" | "saving" | "offline">("loading");
-  const firstSave = useRef(true);
+  const loadedAccountId = useRef<string | null>(null);
+  const alarmAudioContext = useRef<AudioContext | null>(null);
+  const alarmPulseTimer = useRef<number | null>(null);
+  const [ringingAlarm, setRingingAlarm] = useState<Alarm | null>(null);
+  const [alarmPermission, setAlarmPermission] = useState<AlarmPermission>(() => typeof window !== "undefined" && "Notification" in window ? Notification.permission : "unsupported");
   const [toast, setToast] = useState("");
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [assistantPrompt, setAssistantPrompt] = useState("");
@@ -291,6 +324,91 @@ export default function Home() {
     ? clock.toLocaleString("en-IN", { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }).toUpperCase()
     : "SYNCING DATE & TIME";
 
+  const notify = useCallback((message: string) => {
+    setToast(message);
+    window.setTimeout(() => setToast(""), 2600);
+  }, []);
+
+  const stopAlarmSound = useCallback(() => {
+    if (alarmPulseTimer.current !== null) {
+      window.clearInterval(alarmPulseTimer.current);
+      alarmPulseTimer.current = null;
+    }
+  }, []);
+
+  const prepareAlarmAlerts = useCallback(async () => {
+    let permission: AlarmPermission = "unsupported";
+    if ("Notification" in window) {
+      permission = Notification.permission;
+      if (permission === "default") permission = await Notification.requestPermission();
+    }
+    setAlarmPermission(permission);
+
+    const AudioContextConstructor = window.AudioContext
+      || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (AudioContextConstructor) {
+      const context = alarmAudioContext.current || new AudioContextConstructor();
+      alarmAudioContext.current = context;
+      if (context.state === "suspended") await context.resume();
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      gain.gain.value = 0.00001;
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start();
+      oscillator.stop(context.currentTime + 0.02);
+    }
+    return permission;
+  }, []);
+
+  const startAlarmSound = useCallback(() => {
+    stopAlarmSound();
+    const AudioContextConstructor = window.AudioContext
+      || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextConstructor) return;
+    const context = alarmAudioContext.current || new AudioContextConstructor();
+    alarmAudioContext.current = context;
+
+    const pulse = () => {
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = "square";
+      oscillator.frequency.setValueAtTime(880, context.currentTime);
+      oscillator.frequency.setValueAtTime(660, context.currentTime + 0.18);
+      gain.gain.setValueAtTime(0.0001, context.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.32, context.currentTime + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.42);
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start();
+      oscillator.stop(context.currentTime + 0.44);
+    };
+
+    void context.resume().then(pulse).catch(() => undefined);
+    alarmPulseTimer.current = window.setInterval(pulse, 760);
+  }, [stopAlarmSound]);
+
+  const triggerAlarm = useCallback((alarm: Alarm, forceSound = false) => {
+    setRingingAlarm(alarm);
+    if (forceSound || state.settings.sound) startAlarmSound();
+    if ("Notification" in window && Notification.permission === "granted") {
+      const options: NotificationOptions = {
+        body: `${alarm.time} · Mission: ${alarm.mission}`,
+        icon: "/icons/icon-192.png",
+        badge: "/icons/icon-192.png",
+        tag: `lifequest-alarm-${alarm.id}`,
+        requireInteraction: true,
+      };
+      if ("serviceWorker" in navigator) {
+        void navigator.serviceWorker.ready
+          .then((registration) => registration.showNotification(alarm.label || "LifeQuest alarm", options))
+          .catch(() => new Notification(alarm.label || "LifeQuest alarm", options));
+      } else {
+        new Notification(alarm.label || "LifeQuest alarm", options);
+      }
+    }
+  }, [startAlarmSound, state.settings.sound]);
+
   useEffect(() => {
     const updateClock = () => {
       const next = new Date();
@@ -303,37 +421,73 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    return stopAlarmSound;
+  }, [stopAlarmSound]);
+
+  useEffect(() => {
     fetch("/api/auth/session").then((response) => response.ok ? response.json() : Promise.reject())
-      .then((payload) => setAccount(payload.user)).catch(() => setAccount(null)).finally(() => setSessionLoading(false));
+      .then((payload) => {
+        const restoredAccount = payload.user as AppAccount;
+        const startedOn = restoredAccount.createdAt ? localDateKey(new Date(restoredAccount.createdAt)) : localDateKey(new Date());
+        loadedAccountId.current = null;
+        setState(createInitialState(restoredAccount.name, startedOn));
+        setHydrated(false);
+        setAccount(restoredAccount);
+      })
+      .catch(() => {
+        loadedAccountId.current = null;
+        setState(createInitialState());
+        setAccount(null);
+      })
+      .finally(() => setSessionLoading(false));
   }, []);
 
   useEffect(() => {
     if (sessionLoading) return;
+    let cancelled = false;
+    loadedAccountId.current = null;
+
     if (!account) {
-      const timer = window.setTimeout(() => { setHydrated(true); setSyncStatus("offline"); }, 0);
+      const timer = window.setTimeout(() => {
+        if (cancelled) return;
+        setHydrated(true);
+        setSyncStatus("offline");
+      }, 0);
       return () => window.clearTimeout(timer);
     }
-    const timer = window.setTimeout(() => setHydrated(false), 0);
+
+    const todayKey = localDateKey(new Date());
+    const startedOn = account.createdAt ? localDateKey(new Date(account.createdAt)) : todayKey;
+    const freshState = createInitialState(account.name, startedOn);
     fetch("/api/state")
       .then((response) => response.ok ? response.json() : Promise.reject())
       .then((payload) => {
-        if (payload.state) {
-          const startedOn = account.createdAt ? localDateKey(new Date(account.createdAt)) : undefined;
-          setState(syncStateToDate(payload.state, localDateKey(new Date()), startedOn));
-        }
-        setSyncStatus("saved");
+        if (cancelled) return;
+        const savedState = payload.state as LifeQuestState | null;
+        const hasPersonalState = Boolean(savedState && !isLegacyDemoState(savedState, account));
+        const nextState = hasPersonalState
+          ? syncStateToDate(savedState!, todayKey, startedOn)
+          : freshState;
+        loadedAccountId.current = account.id;
+        setState(nextState);
+        setSyncStatus(hasPersonalState ? "saved" : "saving");
+        setHydrated(true);
       })
-      .catch(() => setSyncStatus("offline"))
-      .finally(() => setHydrated(true));
-    return () => window.clearTimeout(timer);
+      .catch(() => {
+        if (cancelled) return;
+        loadedAccountId.current = null;
+        setSyncStatus("offline");
+        setHydrated(true);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [account, sessionLoading]);
 
   useEffect(() => {
-    if (!hydrated) return;
-    if (firstSave.current) { firstSave.current = false; return; }
+    if (!hydrated || !account || loadedAccountId.current !== account.id) return;
     setSyncStatus("saving");
     const timer = window.setTimeout(() => {
-      if (!account) return;
       fetch("/api/state", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ state }) })
         .then((response) => { if (!response.ok) throw new Error(); setSyncStatus("saved"); })
         .catch(() => setSyncStatus("offline"));
@@ -341,14 +495,38 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [state, hydrated, account]);
 
-  const notify = (message: string) => {
-    setToast(message);
-    window.setTimeout(() => setToast(""), 2600);
-  };
+  useEffect(() => {
+    if (!hydrated || !account) return;
+    const checkAlarms = () => {
+      const now = new Date();
+      const due = state.alarms.find((alarm) => isAlarmDue(alarm, now));
+      if (!due) return;
+      const alarmKey = `${localDateKey(now)}:${due.id}:${due.time}`;
+      const storageKey = `lifequest-last-alarm-${account.id}`;
+      if (window.localStorage.getItem(storageKey) === alarmKey) return;
+      window.localStorage.setItem(storageKey, alarmKey);
+      triggerAlarm(due);
+    };
+    checkAlarms();
+    const timer = window.setInterval(checkAlarms, 1_000);
+    return () => window.clearInterval(timer);
+  }, [account, hydrated, state.alarms, triggerAlarm]);
+
+  const dismissAlarm = useCallback(() => {
+    stopAlarmSound();
+    setRingingAlarm(null);
+    notify("Wake mission cleared! Alarm dismissed");
+  }, [notify, stopAlarmSound]);
+
+  const testAlarm = useCallback(async (alarm?: Alarm) => {
+    await prepareAlarmAlerts();
+    triggerAlarm(alarm || { id: -1, time: new Date().toTimeString().slice(0, 5), label: "Alarm sound test", mission: "Math challenge", enabled: true }, true);
+  }, [prepareAlarmAlerts, triggerAlarm]);
 
   const award = (xp: number, coins: number, message: string) => {
-    setState((current) => ({ ...current, profile: { ...current.profile, xp: current.profile.xp + xp, coins: current.profile.coins + coins } }));
-    notify(`${message}  +${xp} XP  +${coins} coins`);
+    const rewardedCoins = Math.round(coins * (state.settings?.coinMultiplier || 1));
+    setState((current) => ({ ...current, profile: { ...current.profile, xp: current.profile.xp + xp, coins: current.profile.coins + rewardedCoins } }));
+    notify(`${message}  +${xp} XP  +${rewardedCoins} coins`);
   };
 
   const currentMonthKey = today.slice(0, 7);
@@ -388,10 +566,16 @@ export default function Home() {
   const toggleTask = (id: number) => {
     const target = state.tasks.find((task) => task.id === id);
     if (!target) return;
+    const direction = target.done ? -1 : 1;
     setState((current) => ({
       ...current,
       tasks: current.tasks.map((task) => task.id === id ? { ...task, done: !task.done } : task),
-      profile: target.done ? current.profile : { ...current.profile, xp: current.profile.xp + target.xp, coins: current.profile.coins + Math.round(target.xp / 5) },
+      profile: {
+        ...current.profile,
+        xp: Math.max(0, current.profile.xp + (direction * target.xp)),
+        coins: Math.max(0, current.profile.coins + (direction * Math.round((target.xp / 5) * (current.settings?.coinMultiplier || 1)))),
+        focusMinutes: Math.max(0, current.profile.focusMinutes + (direction * target.duration)),
+      },
     }));
     if (!target.done) notify(`Mission complete! +${target.xp} XP`);
   };
@@ -399,10 +583,15 @@ export default function Home() {
   const toggleHabit = (id: number) => {
     const target = state.habits.find((habit) => habit.id === id);
     if (!target) return;
+    const direction = target.done ? -1 : 1;
     setState((current) => ({
       ...current,
       habits: current.habits.map((habit) => habit.id === id ? { ...habit, done: !habit.done, streak: habit.done ? Math.max(0, habit.streak - 1) : habit.streak + 1 } : habit),
-      profile: target.done ? current.profile : { ...current.profile, coins: current.profile.coins + target.reward, xp: current.profile.xp + 30 },
+      profile: {
+        ...current.profile,
+        coins: Math.max(0, current.profile.coins + (direction * Math.round(target.reward * (current.settings?.coinMultiplier || 1)))),
+        xp: Math.max(0, current.profile.xp + (direction * 30)),
+      },
     }));
     if (!target.done) notify(`Habit combo extended! +${target.reward} coins`);
   };
@@ -411,15 +600,22 @@ export default function Home() {
     <main className={`app-shell theme-${state.settings?.theme || "cyber"} ${state.settings?.compact ? "compact-mode" : ""}`}>
       <div className="world-fog fog-one"/><div className="world-fog fog-two"/><div className="hud-scanlines"/>
       {toast && <div className="toast"><span>◆</span>{toast}</div>}
-      {!account && <LoginGate onLogin={(next) => { firstSave.current = true; setAccount(next); notify(`Welcome, ${next.name}`); }} />}
+      {!account && <LoginGate onLogin={(next) => {
+        const startedOn = next.createdAt ? localDateKey(new Date(next.createdAt)) : localDateKey(new Date());
+        loadedAccountId.current = null;
+        setState(createInitialState(next.name, startedOn));
+        setHydrated(false);
+        setAccount(next);
+        notify(`Welcome, ${next.name}`);
+      }} />}
       <aside className="sidebar">
         <button className="brand" onClick={() => setActive("overview")}><span className="brand-mark">LQ</span><span>LIFEQUEST<small>90</small></span></button>
         <nav className="nav-list" aria-label="Main navigation">
           {NAV.map((item) => <button key={item.id} onClick={() => setActive(item.id)} className={active === item.id ? "nav-item active" : "nav-item"}><span>{item.icon}</span>{item.label}</button>)}
         </nav>
         <div className={`player-card ${equippedEffect ? "cosmetic-effect" : ""}`}>
-          <div className="avatar">KK</div>
-          <div><strong>{equippedSticker?.icon} {state.profile.name} {equippedBadge?.icon}</strong><span>LEVEL {Math.floor(state.profile.xp / 1000) + 1} · BUILDER</span></div>
+          <div className="avatar">{playerInitials(state.profile.name)}</div>
+          <div><strong>{equippedSticker?.icon} {state.profile.name} {equippedBadge?.icon}</strong><span>LEVEL {playerLevel(state.profile.xp)} · {playerRank(state.profile.xp)}</span></div>
           <b>›</b>
         </div>
       </aside>
@@ -427,21 +623,30 @@ export default function Home() {
       <section className="main-stage">
         <header className="topbar">
           <div><span className={`online-dot ${syncStatus === "offline" ? "offline" : ""}`} /> {syncStatus === "saving" ? "SAVING PROGRESS" : syncStatus === "offline" ? "LOCAL MODE" : "SYSTEM ONLINE"} <b>· {currentDateTime}</b></div>
-          <div className="resource-bar"><button className="ai-online-button" onClick={() => setAssistantOpen(true)}><i/> QUEST AI</button><span>🔥 <b>{state.profile.streak}</b> day streak</span><span>◈ <b>{state.profile.coins.toLocaleString("en-IN")}</b> coins</span><button aria-label="Notifications" onClick={async () => { if ("Notification" in window) { const result = await Notification.requestPermission(); notify(result === "granted" ? "Quest alerts enabled" : "Alerts remain disabled"); } }}>♢</button></div>
+          <div className="resource-bar"><button className="ai-online-button" onClick={() => setAssistantOpen(true)}><i/> QUEST AI</button><span>🔥 <b>{state.profile.streak}</b> day streak</span><span>◈ <b>{state.profile.coins.toLocaleString("en-IN")}</b> coins</span><button aria-label="Enable alarm notifications" onClick={async () => { const result = await prepareAlarmAlerts(); notify(result === "granted" ? "Alarm sound and notifications enabled" : "Alarm sound prepared; notifications remain disabled"); }}>♢</button></div>
         </header>
 
         <div className="dashboard">
           {active === "overview" && <Overview state={state} expenseTotal={expenseTotal} completedTasks={completedTasks} recommendations={recommendations} toggleTask={toggleTask} toggleHabit={toggleHabit} go={setActive} openAssistant={() => setAssistantOpen(true)} currentDayCode={currentDayCode} clock={clock} />}
-          {active === "reset" && <ResetModule state={state} setState={setState} award={award} />}
+          {active === "reset" && <ResetModule state={state} setState={setState} award={award} today={today} />}
           {active === "planner" && <PlannerModule state={state} setState={setState} toggleTask={toggleTask} toggleHabit={toggleHabit} notify={notify} />}
           {active === "revision" && <RevisionModule state={state} setState={setState} award={award} today={today} />}
-          {active === "alarm" && <AlarmModule state={state} setState={setState} notify={notify} />}
+          {active === "alarm" && <AlarmModule state={state} setState={setState} notify={notify} permission={alarmPermission} prepareAlerts={prepareAlarmAlerts} testAlarm={testAlarm} />}
           {active === "gym" && <GymModule state={state} setState={setState} award={award} currentDayCode={currentDayCode} />}
           {active === "expenses" && <ExpenseModule state={state} setState={setState} total={expenseTotal} notify={notify} today={today} />}
-          {active === "rewards" && <RewardModule state={state} setState={setState} notify={notify} />}
-          {active === "change" && <ChangeModule state={state} setState={setState} award={award} />}
+          {active === "rewards" && <RewardModule state={state} setState={setState} notify={notify} today={today} />}
+          {active === "change" && <ChangeModule state={state} setState={setState} notify={notify} />}
           {active === "history" && <HistoryModule state={state} today={today} />}
-          {active === "settings" && <SettingsModule state={state} setState={setState} account={account} logout={async () => { await fetch("/api/auth/logout", { method: "POST" }); setAccount(null); setState(DEFAULT_STATE); setActive("overview"); }} notify={notify} today={today} />}
+          {active === "settings" && <SettingsModule state={state} setState={setState} account={account} logout={async () => {
+            await fetch("/api/auth/logout", { method: "POST" });
+            stopAlarmSound();
+            setRingingAlarm(null);
+            loadedAccountId.current = null;
+            setHydrated(false);
+            setAccount(null);
+            setState(createInitialState());
+            setActive("overview");
+          }} notify={notify} today={today} />}
         </div>
       </section>
       <button className={`ai-companion ${assistantOpen ? "active" : ""}`} onClick={() => setAssistantOpen((open) => !open)} aria-label="Open Quest AI assistant"><span className="ai-core">AI</span><i/><b>ASK QUEST AI</b></button>
@@ -453,6 +658,7 @@ export default function Home() {
         <form className="assistant-input" onSubmit={(event) => { event.preventDefault(); void askAssistant(); }}><input value={assistantPrompt} onChange={(event) => setAssistantPrompt(event.target.value)} placeholder="Ask anything in Hindi, Hinglish or English..." aria-label="Message Quest AI" disabled={assistantThinking}/><button type="submit" disabled={assistantThinking}>{assistantThinking ? "THINKING" : "SEND"}</button></form>
         <small className="assistant-note">Real AI + private app context. App-changing actions always require confirmation.</small>
       </aside>
+      {ringingAlarm && <AlarmMission key={`${ringingAlarm.id}-${ringingAlarm.time}`} alarm={ringingAlarm} dismiss={dismissAlarm} notify={notify} />}
     </main>
   );
 }
@@ -466,13 +672,38 @@ function LoginGate({ onLogin }: { onLogin: (account: AppAccount) => void }) {
   const [challengeId, setChallengeId] = useState("");
   const [pendingMethod, setPendingMethod] = useState<"mobile" | "google">("mobile");
   const [status, setStatus] = useState("");
+  const [resendIn, setResendIn] = useState(0);
+  const [requestingOtp, setRequestingOtp] = useState(false);
+
+  useEffect(() => {
+    if (mode !== "otp" || resendIn <= 0) return;
+    const timer = window.setInterval(() => setResendIn((seconds) => Math.max(0, seconds - 1)), 1_000);
+    return () => window.clearInterval(timer);
+  }, [mode, resendIn]);
+
   const requestOtp = async (method: "mobile" | "google") => {
+    if (requestingOtp || (mode === "otp" && resendIn > 0)) return;
+    setRequestingOtp(true);
     setStatus("Sending secure OTP…");
     const destination = method === "mobile" ? `+91${mobile}` : email;
-    const response = await fetch("/api/auth/request-otp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: method === "mobile" ? "sms" : "email", destination }) });
-    const payload = await response.json() as { challengeId?: string; error?: string };
-    if (!response.ok || !payload.challengeId) { setStatus(payload.error || "Could not send OTP"); return; }
-    setChallengeId(payload.challengeId); setPendingMethod(method); setStatus(`OTP sent to ${destination}`); setMode("otp");
+    try {
+      const response = await fetch("/api/auth/request-otp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: method === "mobile" ? "sms" : "email", destination }) });
+      const payload = await response.json() as { challengeId?: string; error?: string };
+      if (!response.ok || !payload.challengeId) {
+        setStatus(payload.error === "OTP_RATE_LIMIT" ? "Please wait 15 seconds before requesting another OTP." : payload.error || "Could not send OTP");
+        return;
+      }
+      setChallengeId(payload.challengeId);
+      setPendingMethod(method);
+      setOtp("");
+      setResendIn(15);
+      setStatus(`OTP sent to ${destination}`);
+      setMode("otp");
+    } catch {
+      setStatus("Could not connect. Check your internet and try again.");
+    } finally {
+      setRequestingOtp(false);
+    }
   };
   const verifyOtp = async () => {
     setStatus("Verifying…");
@@ -483,9 +714,9 @@ function LoginGate({ onLogin }: { onLogin: (account: AppAccount) => void }) {
   };
   return <div className="login-gate"><section className="login-card game-panel"><div className="login-emblem">LQ<span>90</span></div><span className="eyebrow">PLAYER AUTHENTICATION</span><h1>ENTER LIFEQUEST</h1><p>Your missions, progress, rewards and settings stay linked to your player profile.</p>
     {mode === "choose" && <div className="login-actions"><button className="google-login" onClick={() => setMode("google")}><b>G</b> Login with Gmail OTP</button><button className="mobile-login" onClick={() => setMode("mobile")}><b>▣</b> Login using mobile OTP</button></div>}
-    {mode === "mobile" && <div className="login-form"><label>PLAYER NAME<input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name"/></label><label>MOBILE NUMBER<div className="phone-input"><span>+91</span><input inputMode="numeric" maxLength={10} value={mobile} onChange={(e) => setMobile(e.target.value.replace(/\D/g, ""))} placeholder="10-digit number"/></div></label><small>{status || "A one-time code will be sent securely by SMS."}</small><button className="glow-btn full" disabled={mobile.length !== 10} onClick={() => void requestOtp("mobile")}>SEND OTP</button><button className="text-button" onClick={() => setMode("choose")}>← Back</button></div>}
-    {mode === "otp" && <div className="login-form"><label>ENTER OTP<input inputMode="numeric" maxLength={6} value={otp} onChange={(e) => setOtp(e.target.value.replace(/\D/g, ""))} placeholder="6-digit OTP"/></label><small>{status}</small><button className="glow-btn full" disabled={otp.length !== 6} onClick={() => void verifyOtp()}>VERIFY & START</button><button className="text-button" onClick={() => setMode(pendingMethod === "mobile" ? "mobile" : "google")}>← Change destination</button></div>}
-    {mode === "google" && <div className="login-form"><label>PLAYER NAME<input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name"/></label><label>GMAIL ADDRESS<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@gmail.com"/></label><small>{status || "A one-time code will be sent securely through Gmail."}</small><button className="google-login" disabled={!email.includes("@")} onClick={() => void requestOtp("google")}><b>G</b> SEND GMAIL OTP</button><button className="text-button" onClick={() => setMode("choose")}>← Back</button></div>}
+    {mode === "mobile" && <div className="login-form"><label>PLAYER NAME<input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name"/></label><label>MOBILE NUMBER<div className="phone-input"><span>+91</span><input inputMode="numeric" maxLength={10} value={mobile} onChange={(e) => setMobile(e.target.value.replace(/\D/g, ""))} placeholder="10-digit number"/></div></label><small>{status || "A one-time code will be sent securely by SMS."}</small><button className="glow-btn full" disabled={mobile.length !== 10 || requestingOtp} onClick={() => void requestOtp("mobile")}>{requestingOtp ? "SENDING…" : "SEND OTP"}</button><button className="text-button" onClick={() => setMode("choose")}>← Back</button></div>}
+    {mode === "otp" && <div className="login-form"><label>ENTER OTP<input inputMode="numeric" maxLength={6} value={otp} onChange={(e) => setOtp(e.target.value.replace(/\D/g, ""))} placeholder="6-digit OTP"/></label><small>{status}</small><button className="glow-btn full" disabled={otp.length !== 6} onClick={() => void verifyOtp()}>VERIFY & START</button><button className="resend-otp" disabled={resendIn > 0 || requestingOtp} onClick={() => void requestOtp(pendingMethod)}>{requestingOtp ? "SENDING…" : resendIn > 0 ? `RESEND ${pendingMethod === "google" ? "GMAIL" : "MOBILE"} OTP IN ${resendIn}s` : `RESEND ${pendingMethod === "google" ? "GMAIL" : "MOBILE"} OTP`}</button><button className="text-button" onClick={() => setMode(pendingMethod === "mobile" ? "mobile" : "google")}>← Change destination</button></div>}
+    {mode === "google" && <div className="login-form"><label>PLAYER NAME<input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name"/></label><label>GMAIL ADDRESS<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@gmail.com"/></label><small>{status || "A one-time code will be sent securely through Gmail."}</small><button className="google-login" disabled={!email.includes("@") || requestingOtp} onClick={() => void requestOtp("google")}><b>G</b> {requestingOtp ? "SENDING…" : "SEND GMAIL OTP"}</button><button className="text-button" onClick={() => setMode("choose")}>← Back</button></div>}
   </section></div>;
 }
 
@@ -508,12 +739,12 @@ function SettingsModule({ state, setState, account, logout, notify, today }: { s
   const settings = state.settings || DEFAULT_STATE.settings;
   const resetToday = () => { if (!window.confirm("Reset all task and habit checkmarks for today?")) return; setState((s) => ({ ...s, tasks: s.tasks.map((x) => ({ ...x, done: false })), habits: s.habits.map((x) => ({ ...x, done: false })), revisions: s.revisions.map((x) => ({ ...x, done: false })), changeHabits: s.changeHabits.map((x) => ({ ...x, done: false })) })); notify("Today's mission status reset"); };
   const resetJourney = () => { if (!window.confirm("Restart the 90-day journey from Day 1? Your custom tasks and expenses will stay.")) return; setState((s) => ({ ...s, profile: { ...s.profile, day: 1, xp: 0, coins: 0, streak: 0, journeyStartedOn: today || s.profile.journeyStartedOn, lastActiveDate: today || s.profile.lastActiveDate } })); notify("90-day campaign restarted"); };
-  const factoryReset = () => { if (!window.confirm("Factory reset everything? This permanently clears this profile's custom data.")) return; setState({ ...DEFAULT_STATE, profile: { ...DEFAULT_STATE.profile, name: state.profile.name, day: 1, xp: 0, coins: 0, streak: 0, journeyStartedOn: today || undefined, lastActiveDate: today || undefined }, history: [] }); notify("App returned to default settings"); };
+  const factoryReset = () => { if (!window.confirm("Factory reset everything? This permanently clears this profile's custom data.")) return; setState(createInitialState(state.profile.name, today || localDateKey(new Date()))); notify("App returned to default settings"); };
   const deleteAccount = async () => { if (!window.confirm("Permanently delete your account and all LifeQuest progress? This cannot be undone.")) return; const confirmation = window.prompt('Type DELETE to confirm'); if (confirmation !== "DELETE") return; const response = await fetch("/api/auth/account", { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirmation }) }); if (!response.ok) { notify("Account could not be deleted"); return; } await logout(); };
   const update = (patch: Partial<LifeQuestState["settings"]>) => setState((s) => ({ ...s, settings: { ...(s.settings || DEFAULT_STATE.settings), ...patch } }));
   return <><ModuleHeader code="CONTROL ROOM // PERSONALIZE" title="Make LifeQuest yours." text="Customize the game experience, daily targets, rewards and reset only the data you choose." stat="PLAYER SETTINGS" />
     <section className="settings-grid"><article className="game-panel setting-card"><span className="eyebrow">PLAYER PROFILE</span><h2>{state.profile.name}</h2><p>{account?.method === "google" ? "Gmail OTP profile" : "Mobile OTP profile"} · {account?.label}</p><p>90-day journey started: {state.profile.journeyStartedOn ? dateFromKey(state.profile.journeyStartedOn).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" }) : "Syncing…"}</p><label>Display name<input value={state.profile.name} onChange={(e) => setState((s) => ({ ...s, profile: { ...s.profile, name: e.target.value } }))}/></label><button className="secondary-btn" onClick={logout}>LOG OUT</button></article>
-      <article className="game-panel setting-card"><span className="eyebrow">GAME EXPERIENCE</span><h2>Interface loadout</h2><label>Theme<select value={settings.theme} onChange={(e) => update({ theme: e.target.value as LifeQuestState["settings"]["theme"] })}><option value="cyber">Cyber Cyan</option><option value="royal">Royal Purple</option><option value="stealth">Stealth Red</option></select></label><div className="setting-toggle"><span><strong>Compact dashboard</strong><small>Fit more missions on screen</small></span><button className={`toggle ${settings.compact ? "on" : ""}`} onClick={() => update({ compact: !settings.compact })}><i/></button></div><div className="setting-toggle"><span><strong>Sound effects</strong><small>Reward and mission feedback</small></span><button className={`toggle ${settings.sound ? "on" : ""}`} onClick={() => update({ sound: !settings.sound })}><i/></button></div></article>
+      <article className="game-panel setting-card"><span className="eyebrow">GAME EXPERIENCE</span><h2>Interface loadout</h2><label>Theme<select value={settings.theme} onChange={(e) => update({ theme: e.target.value as LifeQuestState["settings"]["theme"] })}><option value="cyber">Cyber Cyan</option><option value="royal">Royal Purple</option><option value="stealth">Stealth Red</option></select></label><div className="setting-toggle"><span><strong>Compact dashboard</strong><small>Fit more missions on screen</small></span><button className={`toggle ${settings.compact ? "on" : ""}`} onClick={() => update({ compact: !settings.compact })}><i/></button></div><div className="setting-toggle"><span><strong>Alarm sound</strong><small>Play the repeating wake-up tone</small></span><button className={`toggle ${settings.sound ? "on" : ""}`} onClick={() => update({ sound: !settings.sound })}><i/></button></div></article>
       <article className="game-panel setting-card"><span className="eyebrow">GAME RULES</span><h2>Your difficulty</h2><label>Daily priority mission goal<input type="number" min="1" max="12" value={settings.dailyGoal} onChange={(e) => update({ dailyGoal: Number(e.target.value) })}/></label><label>Coin reward multiplier<select value={settings.coinMultiplier} onChange={(e) => update({ coinMultiplier: Number(e.target.value) })}><option value={0.5}>0.5× Hard</option><option value={1}>1× Balanced</option><option value={1.5}>1.5× Boosted</option></select></label><p className="info-chip">You can also customize habits, missions, rewards, alarms and gym days inside their own modules.</p></article>
       <article className="game-panel setting-card danger-zone"><span className="eyebrow">RESET ZONE</span><h2>Reset controls</h2><button onClick={resetToday}>RESET TODAY&apos;S CHECKMARKS <small>Keep all tasks, clear completion only</small></button><button onClick={resetJourney}>RESTART 90-DAY JOURNEY <small>Keep personal plans and expenses</small></button><button className="danger" onClick={factoryReset}>FACTORY RESET APP <small>Clear all customized profile data</small></button><button className="danger" onClick={() => void deleteAccount()}>DELETE ACCOUNT <small>Permanently erase profile, progress and sessions</small></button></article></section>
   </>;
@@ -548,17 +779,26 @@ function ModuleHeader({ code, title, text, stat }: { code: string; title: string
   return <header className="module-header"><div><span className="eyebrow">{code}</span><h1>{title}</h1><p>{text}</p></div>{stat && <div className="header-stat"><span>LIVE STAT</span><b>{stat}</b></div>}</header>;
 }
 
-function ResetModule({ state, setState, award }: { state: LifeQuestState; setState: React.Dispatch<React.SetStateAction<LifeQuestState>>; award: (xp: number, coins: number, message: string) => void }) {
+function ResetModule({ state, setState, award, today }: { state: LifeQuestState; setState: React.Dispatch<React.SetStateAction<LifeQuestState>>; award: (xp: number, coins: number, message: string) => void; today: string }) {
   const phases = [{ name: "Ignition", range: "Days 1–22", desc: "Stabilize sleep, environment and basic routines." }, { name: "Momentum", range: "Days 23–66", desc: "Increase deep work and strengthen identity-based habits." }, { name: "Expansion", range: "Days 67–90", desc: "Raise difficulty, lead yourself and lock in the new standard." }];
   const phaseStarts = [1, 23, 67];
   const phaseEnds = [22, 66, 90];
+  const morningClaimed = Boolean(today && state.checkin.morningClaimedOn === today);
+  const eveningClaimed = Boolean(today && state.checkin.eveningClaimedOn === today);
+  const claimCheckin = (period: "morning" | "evening") => {
+    const field = period === "morning" ? state.checkin.morning : state.checkin.evening;
+    const alreadyClaimed = period === "morning" ? morningClaimed : eveningClaimed;
+    if (!today || !field.trim() || alreadyClaimed) return;
+    setState((current) => ({ ...current, checkin: { ...current.checkin, [period === "morning" ? "morningClaimedOn" : "eveningClaimedOn"]: today } }));
+    award(period === "morning" ? 30 : 40, period === "morning" ? 10 : 15, period === "morning" ? "Morning intention locked" : "Reflection saved");
+  };
   return <>
     <ModuleHeader code="90-DAY CAMPAIGN // LIFE RESET" title="Rebuild. Level by level." text="Your reset adapts across three phases, with reflection checkpoints and real rewards." stat={`DAY ${state.profile.day} / 90`} />
     <div className="phase-grid">{phases.map((phase, index) => { const start = phaseStarts[index], end = phaseEnds[index]; const active = state.profile.day >= start && state.profile.day <= end; const progress = state.profile.day < start ? 0 : state.profile.day > end ? 100 : ((state.profile.day - start + 1) / (end - start + 1)) * 100; return <article className={`game-panel phase-card ${active ? "current" : ""}`} key={phase.name}><span>PHASE 0{index + 1}</span><h2>{phase.name}</h2><b>{phase.range}</b><p>{phase.desc}</p><div className="phase-bar"><i style={{ width: `${Math.min(100, progress)}%` }}/></div></article>; })}</div>
     <section className="game-panel timeline-panel"><div className="panel-heading"><div><span className="eyebrow">CAMPAIGN MAP</span><h2>90-day progression</h2></div><span className="count-chip">{state.profile.day >= 90 ? "CAMPAIGN COMPLETE" : `NEXT LEVEL IN ${10 - (state.profile.day % 10)} DAYS`}</span></div><div className="day-grid">{Array.from({ length: 90 }, (_, i) => i + 1).map((day) => <button key={day} className={day < state.profile.day ? "past" : day === state.profile.day ? "today" : day % 10 === 0 ? "boss" : "future"} title={`Day ${day}`}>{day % 10 === 0 ? `L${day / 10}` : day}</button>)}</div></section>
     <section className="two-column">
-      <article className="game-panel form-panel"><span className="eyebrow">MORNING INTENTION</span><h2>Choose today&apos;s win</h2><label>My single most important outcome<textarea value={state.checkin.morning} onChange={(event) => setState((current) => ({ ...current, checkin: { ...current.checkin, morning: event.target.value } }))}/></label><label>Energy level <input type="range" min="1" max="5" value={state.checkin.energy} onChange={(event) => setState((current) => ({ ...current, checkin: { ...current.checkin, energy: Number(event.target.value) } }))}/><span className="range-value">{state.checkin.energy} / 5</span></label><button className="primary-btn" onClick={() => award(30, 10, "Morning intention locked")}>LOCK INTENTION</button></article>
-      <article className="game-panel form-panel"><span className="eyebrow">EVENING REFLECTION</span><h2>Save the lesson</h2><label>What worked, and what will I improve?<textarea placeholder="Write an honest two-minute reflection..." value={state.checkin.evening} onChange={(event) => setState((current) => ({ ...current, checkin: { ...current.checkin, evening: event.target.value } }))}/></label><button className="secondary-btn" onClick={() => award(40, 15, "Reflection saved")}>COMPLETE DAILY CHECK-IN</button></article>
+      <article className="game-panel form-panel"><span className="eyebrow">MORNING INTENTION</span><h2>Choose today&apos;s win</h2><label>My single most important outcome<textarea value={state.checkin.morning} onChange={(event) => setState((current) => ({ ...current, checkin: { ...current.checkin, morning: event.target.value } }))}/></label><label>Energy level <input type="range" min="1" max="5" value={state.checkin.energy} onChange={(event) => setState((current) => ({ ...current, checkin: { ...current.checkin, energy: Number(event.target.value) } }))}/><span className="range-value">{state.checkin.energy} / 5</span></label><button className="primary-btn" disabled={!state.checkin.morning.trim() || morningClaimed} onClick={() => claimCheckin("morning")}>{morningClaimed ? "INTENTION LOCKED TODAY" : "LOCK INTENTION"}</button></article>
+      <article className="game-panel form-panel"><span className="eyebrow">EVENING REFLECTION</span><h2>Save the lesson</h2><label>What worked, and what will I improve?<textarea placeholder="Write an honest two-minute reflection..." value={state.checkin.evening} onChange={(event) => setState((current) => ({ ...current, checkin: { ...current.checkin, evening: event.target.value } }))}/></label><button className="secondary-btn" disabled={!state.checkin.evening.trim() || eveningClaimed} onClick={() => claimCheckin("evening")}>{eveningClaimed ? "REFLECTION SAVED TODAY" : "COMPLETE DAILY CHECK-IN"}</button></article>
     </section>
   </>;
 }
@@ -581,30 +821,83 @@ function PlannerModule({ state, setState, toggleTask, toggleHabit, notify }: { s
 function RevisionModule({ state, setState, award, today }: { state: LifeQuestState; setState: React.Dispatch<React.SetStateAction<LifeQuestState>>; award: (xp: number, coins: number, message: string) => void; today: string }) {
   const [source, setSource] = useState({ title: "", url: "" });
   const [quiz, setQuiz] = useState<Revision | null>(null);
+  const [answers, setAnswers] = useState<Record<number, string>>({});
   const dueToday = state.revisions.filter((item) => { const due = today ? revisionDate(item, today) : undefined; return !item.done && (due ? due <= today : item.nextReview === "Today"); }).length;
-  const questions = quiz ? [{ q: `Which idea is most central to ${quiz.title}?`, options: ["Active recall", "Passive rereading", "Skipping practice", "Memorizing titles"] }, { q: "Which revision interval comes after Day 7?", options: ["Day 30", "Day 8", "Day 10", "Day 60"] }] : [];
+  const questions = quiz ? [{ q: `Which method best strengthens recall for ${quiz.title}?`, options: ["Active recall", "Passive rereading", "Skipping practice", "Memorizing titles"], correct: "Active recall" }, { q: "Which revision interval comes after Day 7?", options: ["Day 30", "Day 8", "Day 10", "Day 60"], correct: "Day 30" }] : [];
+  const submitQuiz = () => {
+    if (!quiz || Object.keys(answers).length !== questions.length) return;
+    const correct = questions.filter((question, index) => answers[index] === question.correct).length;
+    setState((current) => ({ ...current, revisions: current.revisions.map((item) => item.id === quiz.id ? { ...item, mastery: Math.min(100, item.mastery + (correct * 8)), level: Math.min(9, item.level + (correct === questions.length ? 1 : 0)), nextReview: "In 3 days", reviewDate: today ? shiftDateKey(today, 3) : item.reviewDate, done: true } : item) }));
+    setQuiz(null);
+    setAnswers({});
+    award(correct * 40, correct * 15, `Revision battle: ${correct}/${questions.length} correct`);
+  };
   return <>
     <ModuleHeader code="SPACED REPETITION // KNOWLEDGE ARENA" title="Turn content into memory." text="Save a learning link, generate a quick quiz, and fight forgetting on Days 1, 3, 7 and 30." stat={`${dueToday} DUE TODAY`} />
     <section className="revision-layout">
-      <article className="game-panel revision-list"><div className="panel-heading"><div><span className="eyebrow">ACTIVE DECKS</span><h2>Revision quests</h2></div><span className="count-chip">LEVELS 1–9</span></div>{state.revisions.map((item) => <div className="revision-card" key={item.id}><div className="deck-level">L{item.level}</div><div className="revision-main"><strong>{item.title}</strong><span>Next review: <b>{today ? revisionLabel(item, today) : item.nextReview}</b></span><div className="mastery"><i style={{ width: `${item.mastery}%` }}/></div></div><em>{item.mastery}%</em><button onClick={() => setQuiz(item)}>START QUIZ</button></div>)}</article>
+      <article className="game-panel revision-list"><div className="panel-heading"><div><span className="eyebrow">ACTIVE DECKS</span><h2>Revision quests</h2></div><span className="count-chip">LEVELS 1–9</span></div>{state.revisions.map((item) => <div className="revision-card" key={item.id}><div className="deck-level">L{item.level}</div><div className="revision-main"><strong>{item.title}</strong><span>Next review: <b>{today ? revisionLabel(item, today) : item.nextReview}</b></span><div className="mastery"><i style={{ width: `${item.mastery}%` }}/></div></div><em>{item.mastery}%</em><button disabled={item.done} onClick={() => { setAnswers({}); setQuiz(item); }}>{item.done ? "COMPLETED TODAY" : "START QUIZ"}</button></div>)}</article>
       <article className="game-panel form-panel"><span className="eyebrow">IMPORT KNOWLEDGE</span><h2>Add learning source</h2><label>Topic name<input value={source.title} onChange={(event) => setSource({ ...source, title: event.target.value })} placeholder="e.g. Decision Trees"/></label><label>YouTube / course link<input value={source.url} onChange={(event) => setSource({ ...source, url: event.target.value })} placeholder="Paste URL"/></label><div className="info-chip">AI quiz generation uses the source title in this prototype. Connect a transcript service for full video analysis.</div><button className="primary-btn" onClick={() => { if (!source.title || !source.url) return; setState((current) => ({ ...current, revisions: [...current.revisions, { id: nextId(), title: source.title, url: source.url, nextReview: "Today", reviewDate: today || undefined, mastery: 0, level: 1, done: false }] })); setSource({ title: "", url: "" }); }}>CREATE REVISION DECK</button></article>
     </section>
     <section className="spaced-strip">{[1, 3, 7, 30].map((day, index) => <div key={day}><span>CHECKPOINT 0{index + 1}</span><b>DAY {day}</b><small>{["Quick recall", "Strengthen", "Consolidate", "Long-term lock"][index]}</small></div>)}</section>
-    {quiz && <div className="modal-backdrop"><section className="quiz-modal game-panel"><button className="modal-close" onClick={() => setQuiz(null)}>×</button><span className="eyebrow">AI QUIZ // {quiz.title}</span><h2>Knowledge battle</h2>{questions.map((question, index) => <div className="quiz-question" key={question.q}><strong>{index + 1}. {question.q}</strong>{question.options.map((option) => <label key={option}><input type="radio" name={`q${index}`}/><span>{option}</span></label>)}</div>)}<button className="glow-btn full" onClick={() => { setQuiz(null); setState((current) => ({ ...current, revisions: current.revisions.map((item) => item.id === quiz.id ? { ...item, mastery: Math.min(100, item.mastery + 8), nextReview: "In 3 days", reviewDate: today ? shiftDateKey(today, 3) : item.reviewDate, done: true } : item) })); award(80, 30, "Revision battle cleared"); }}>SUBMIT & CLAIM REWARD</button></section></div>}
+    {quiz && <div className="modal-backdrop"><section className="quiz-modal game-panel"><button className="modal-close" onClick={() => { setQuiz(null); setAnswers({}); }}>×</button><span className="eyebrow">QUIZ // {quiz.title}</span><h2>Knowledge battle</h2>{questions.map((question, index) => <div className="quiz-question" key={question.q}><strong>{index + 1}. {question.q}</strong>{question.options.map((option) => <label key={option}><input type="radio" name={`q${index}`} checked={answers[index] === option} onChange={() => setAnswers((current) => ({ ...current, [index]: option }))}/><span>{option}</span></label>)}</div>)}<button className="glow-btn full" disabled={Object.keys(answers).length !== questions.length} onClick={submitQuiz}>SUBMIT & CLAIM REWARD</button></section></div>}
   </>;
 }
 
-function AlarmModule({ state, setState, notify }: { state: LifeQuestState; setState: React.Dispatch<React.SetStateAction<LifeQuestState>>; notify: (message: string) => void }) {
+function AlarmModule({ state, setState, notify, permission, prepareAlerts, testAlarm }: {
+  state: LifeQuestState;
+  setState: React.Dispatch<React.SetStateAction<LifeQuestState>>;
+  notify: (message: string) => void;
+  permission: AlarmPermission;
+  prepareAlerts: () => Promise<AlarmPermission>;
+  testAlarm: (alarm?: Alarm) => Promise<void>;
+}) {
   const [alarm, setAlarm] = useState({ time: "04:00", label: "", mission: "Math challenge" });
-  const [test, setTest] = useState(false);
+  const nextAlarm = state.alarms.filter((item) => item.enabled).sort((a, b) => a.time.localeCompare(b.time))[0];
+  const armAlarm = async () => {
+    if (!alarm.label.trim()) {
+      notify("Add an alarm label first");
+      return;
+    }
+    await prepareAlerts();
+    setState((current) => ({ ...current, alarms: [...current.alarms, { ...alarm, label: alarm.label.trim(), id: nextId(), enabled: true }] }));
+    setAlarm({ time: "04:00", label: "", mission: "Math challenge" });
+    notify("Alarm armed. Keep the installed app open for web scheduling.");
+  };
   return <>
     <ModuleHeader code="MISSION ALARM // WAKE PROTOCOL" title="Defeat snooze mode." text="Schedule mission-based alarms. Complete a challenge to claim your wake-up streak and coins." stat={`${state.alarms.filter((item) => item.enabled).length} ARMED`} />
     <section className="alarm-layout">
-      <article className="game-panel alarm-clock"><span className="eyebrow">NEXT WAKE EVENT</span><div className="digital-time">{state.alarms.find((item) => item.enabled)?.time || "--:--"}</div><p>{state.alarms.find((item) => item.enabled)?.label || "No alarm armed"}</p><div className="mission-badge">MISSION: {state.alarms.find((item) => item.enabled)?.mission.toUpperCase() || "NONE"}</div><button className="glow-btn full" onClick={() => setTest(true)}>TEST DISMISSAL MISSION</button><small>Web alarms require this app to stay open. Native mobile packaging is needed for guaranteed background alarms.</small></article>
-      <article className="game-panel alarm-list"><div className="panel-heading"><div><span className="eyebrow">WAKE LOADOUT</span><h2>Your alarms</h2></div></div>{state.alarms.map((item) => <div className="alarm-row" key={item.id}><time>{item.time}</time><div><strong>{item.label}</strong><span>{item.mission}</span></div><button className={`toggle ${item.enabled ? "on" : ""}`} onClick={() => setState((current) => ({ ...current, alarms: current.alarms.map((alarmItem) => alarmItem.id === item.id ? { ...alarmItem, enabled: !alarmItem.enabled } : alarmItem) }))}><i/></button></div>)}<div className="form-row alarm-form"><input type="time" value={alarm.time} onChange={(event) => setAlarm({ ...alarm, time: event.target.value })}/><input placeholder="Alarm label" value={alarm.label} onChange={(event) => setAlarm({ ...alarm, label: event.target.value })}/><select value={alarm.mission} onChange={(event) => setAlarm({ ...alarm, mission: event.target.value })}><option>Math challenge</option><option>20 steps</option><option>QR scan</option><option>Memory challenge</option><option>Photo match</option></select></div><button className="primary-btn" onClick={() => { if (!alarm.label) return; setState((current) => ({ ...current, alarms: [...current.alarms, { ...alarm, id: nextId(), enabled: true }] })); setAlarm({ time: "04:00", label: "", mission: "Math challenge" }); }}>ARM NEW ALARM</button></article>
+      <article className="game-panel alarm-clock"><span className="eyebrow">NEXT WAKE EVENT</span><div className="digital-time">{nextAlarm?.time || "--:--"}</div><p>{nextAlarm?.label || "No alarm armed"}</p><div className="mission-badge">MISSION: {nextAlarm?.mission.toUpperCase() || "NONE"}</div><div className={`alarm-readiness ${permission === "granted" ? "ready" : ""}`}><span>NOTIFICATIONS</span><b>{permission === "granted" ? "READY" : permission === "denied" ? "BLOCKED" : permission === "unsupported" ? "UNSUPPORTED" : "ACTION NEEDED"}</b></div><button className="glow-btn full" onClick={() => void testAlarm(nextAlarm)}>TEST SOUND & DISMISSAL</button><button className="secondary-btn full" onClick={async () => { const result = await prepareAlerts(); notify(result === "granted" ? "Alarm notifications enabled" : "Sound prepared; allow notifications in browser settings"); }}>ENABLE ALARM ALERTS</button><small>Web/PWA alarms ring while LifeQuest remains open or active in the background. Android/iOS can suspend or close web apps, so a guaranteed closed-app alarm requires native mobile packaging.</small></article>
+      <article className="game-panel alarm-list"><div className="panel-heading"><div><span className="eyebrow">WAKE LOADOUT</span><h2>Your alarms</h2></div></div>{state.alarms.map((item) => <div className="alarm-row" key={item.id}><time>{item.time}</time><div><strong>{item.label}</strong><span>{item.mission}</span></div><div className="alarm-actions"><button aria-label={`${item.enabled ? "Disable" : "Enable"} ${item.label}`} className={`toggle ${item.enabled ? "on" : ""}`} onClick={async () => { if (!item.enabled) await prepareAlerts(); setState((current) => ({ ...current, alarms: current.alarms.map((alarmItem) => alarmItem.id === item.id ? { ...alarmItem, enabled: !alarmItem.enabled } : alarmItem) })); }}><i/></button><button className="alarm-delete" aria-label={`Delete ${item.label}`} onClick={() => setState((current) => ({ ...current, alarms: current.alarms.filter((alarmItem) => alarmItem.id !== item.id) }))}>×</button></div></div>)}<div className="form-row alarm-form"><input type="time" aria-label="Alarm time" value={alarm.time} onChange={(event) => setAlarm({ ...alarm, time: event.target.value })}/><input aria-label="Alarm label" placeholder="Alarm label" value={alarm.label} onChange={(event) => setAlarm({ ...alarm, label: event.target.value })}/><select aria-label="Dismissal mission" value={alarm.mission} onChange={(event) => setAlarm({ ...alarm, mission: event.target.value })}><option>Math challenge</option><option>20-tap wake check</option><option>Memory challenge</option></select></div><button className="primary-btn" onClick={() => void armAlarm()}>ARM NEW ALARM</button></article>
     </section>
-    {test && <div className="modal-backdrop"><section className="quiz-modal alarm-mission game-panel"><span className="eyebrow">ALARM MISSION ACTIVE</span><h2>17 × 6 = ?</h2><div className="answer-grid">{[92, 102, 112, 96].map((answer) => <button key={answer} onClick={() => { if (answer === 102) { setTest(false); notify("Wake mission cleared! Alarm dismissed"); } else notify("Wrong answer — stay awake and retry"); }}>{answer}</button>)}</div></section></div>}
   </>;
+}
+
+function AlarmMission({ alarm, dismiss, notify }: { alarm: Alarm; dismiss: () => void; notify: (message: string) => void }) {
+  const [taps, setTaps] = useState(0);
+  const mission = alarm.mission.toLowerCase();
+  const isTapMission = mission.includes("20");
+  const isMemoryMission = mission.includes("memory");
+
+  return <div className="modal-backdrop alarm-active"><section className="quiz-modal alarm-mission game-panel" role="alertdialog" aria-modal="true" aria-label={`${alarm.label} alarm`}>
+    <span className="eyebrow">ALARM RINGING // {alarm.time}</span>
+    <h3>{alarm.label}</h3>
+    {isTapMission ? <>
+      <h2>{taps} / 20</h2>
+      <p>Tap twenty times to prove you are awake.</p>
+      <button className="glow-btn full alarm-tap" onClick={() => { const next = taps + 1; setTaps(next); if (next >= 20) dismiss(); }}>TAP TO WAKE</button>
+    </> : isMemoryMission ? <>
+      <h2>7 · 2 · 9</h2>
+      <p>Select the matching memory code.</p>
+      <div className="answer-grid">{["792", "729", "927", "279"].map((answer) => <button key={answer} onClick={() => answer === "729" ? dismiss() : notify("Wrong code — look carefully and retry")}>{answer}</button>)}</div>
+    </> : mission.includes("math") ? <>
+      <h2>17 × 6 = ?</h2>
+      <div className="answer-grid">{[92, 102, 112, 96].map((answer) => <button key={answer} onClick={() => answer === 102 ? dismiss() : notify("Wrong answer — stay awake and retry")}>{answer}</button>)}</div>
+    </> : <>
+      <h2>WAKE CHECK</h2>
+      <p>This older alarm used a mission unavailable in the web app. Confirm that you are awake to dismiss it.</p>
+      <button className="glow-btn full" onClick={dismiss}>I&apos;M AWAKE — DISMISS</button>
+    </>}
+  </section></div>;
 }
 
 function GymModule({ state, setState, award, currentDayCode }: { state: LifeQuestState; setState: React.Dispatch<React.SetStateAction<LifeQuestState>>; award: (xp: number, coins: number, message: string) => void; currentDayCode: string }) {
@@ -626,25 +919,32 @@ function GymModule({ state, setState, award, currentDayCode }: { state: LifeQues
 function ExpenseModule({ state, setState, total, notify, today }: { state: LifeQuestState; setState: React.Dispatch<React.SetStateAction<LifeQuestState>>; total: number; notify: (message: string) => void; today: string }) {
   const [entry, setEntry] = useState({ title: "", category: "Food", amount: 0, date: today });
   const remaining = state.expenses.budget - total;
+  const budgetPercent = state.expenses.budget > 0 ? Math.round((total / state.expenses.budget) * 100) : 0;
   const currentMonthKey = today.slice(0, 7);
   const currentItems = useMemo(() => state.expenses.items.filter((item) => !currentMonthKey || item.date.startsWith(currentMonthKey)), [state.expenses.items, currentMonthKey]);
   const categories = useMemo(() => currentItems.reduce<Record<string, number>>((acc, item) => ({ ...acc, [item.category]: (acc[item.category] || 0) + item.amount }), {}), [currentItems]);
   const currentMonth = today ? dateFromKey(today).toLocaleDateString("en-IN", { month: "long", year: "numeric" }).toUpperCase() : "CURRENT MONTH";
   return <>
-    <ModuleHeader code={`CREDIT CONTROL // ${currentMonth}`} title="Command your money." text="Set a monthly budget, store every expense, and protect the coins that matter in real life." stat={`${Math.round((total / state.expenses.budget) * 100)}% USED`} />
+    <ModuleHeader code={`CREDIT CONTROL // ${currentMonth}`} title="Command your money." text="Set a monthly budget, store every expense, and protect the coins that matter in real life." stat={`${budgetPercent}% USED`} />
     <section className="finance-stats"><article className="game-panel"><span>MONTHLY BUDGET</span><b>{formatMoney(state.expenses.budget)}</b><input type="number" value={state.expenses.budget} onChange={(event) => setState((current) => ({ ...current, expenses: { ...current.expenses, budget: Number(event.target.value) } }))}/></article><article className="game-panel"><span>TOTAL SPENT</span><b>{formatMoney(total)}</b><small>{currentItems.length} transactions</small></article><article className={`game-panel ${remaining < 0 ? "danger" : ""}`}><span>REMAINING</span><b>{formatMoney(remaining)}</b><small>{remaining >= 0 ? "Budget shield active" : "Budget exceeded"}</small></article></section>
     <section className="expense-layout">
       <article className="game-panel expense-log"><div className="panel-heading"><div><span className="eyebrow">TRANSACTION LOG</span><h2>This month&apos;s expenses</h2></div></div><div className="expense-table">{currentItems.slice().reverse().map((item) => <div key={item.id}><span className="expense-icon">{item.category === "Food" ? "🍲" : item.category === "Fitness" ? "◆" : item.category === "Housing" ? "⌂" : "₹"}</span><div><strong>{item.title}</strong><small>{item.category} · {item.date}</small></div><b>-{formatMoney(item.amount)}</b><button onClick={() => setState((current) => ({ ...current, expenses: { ...current.expenses, items: current.expenses.items.filter((entryItem) => entryItem.id !== item.id) } }))}>×</button></div>)}</div></article>
-      <article className="game-panel form-panel"><span className="eyebrow">LOG EXPENSE</span><h2>New transaction</h2><label>Description<input value={entry.title} onChange={(event) => setEntry({ ...entry, title: event.target.value })} placeholder="What did you spend on?"/></label><div className="form-row"><label>Amount<input type="number" min="0" value={entry.amount || ""} onChange={(event) => setEntry({ ...entry, amount: Number(event.target.value) })}/></label><label>Category<select value={entry.category} onChange={(event) => setEntry({ ...entry, category: event.target.value })}><option>Food</option><option>Housing</option><option>Fitness</option><option>Education</option><option>Travel</option><option>Fun</option><option>Other</option></select></label></div><label>Date<input type="date" value={entry.date} onChange={(event) => setEntry({ ...entry, date: event.target.value })}/></label><button className="primary-btn" onClick={() => { if (!entry.title || entry.amount <= 0) return; setState((current) => ({ ...current, expenses: { ...current.expenses, items: [...current.expenses.items, { ...entry, id: nextId() }] } })); setEntry({ title: "", category: "Food", amount: 0, date: today }); notify("Expense stored in monthly ledger"); }}>STORE EXPENSE</button><div className="category-mini">{Object.entries(categories).map(([category, amount]) => <div key={category}><span>{category}</span><i><b style={{ width: `${Math.min(100, (amount / total) * 100)}%` }}/></i><em>{formatMoney(amount)}</em></div>)}</div></article>
+      <article className="game-panel form-panel"><span className="eyebrow">LOG EXPENSE</span><h2>New transaction</h2><label>Description<input value={entry.title} onChange={(event) => setEntry({ ...entry, title: event.target.value })} placeholder="What did you spend on?"/></label><div className="form-row"><label>Amount<input type="number" min="0" value={entry.amount || ""} onChange={(event) => setEntry({ ...entry, amount: Number(event.target.value) })}/></label><label>Category<select value={entry.category} onChange={(event) => setEntry({ ...entry, category: event.target.value })}><option>Food</option><option>Housing</option><option>Fitness</option><option>Education</option><option>Travel</option><option>Fun</option><option>Other</option></select></label></div><label>Date<input type="date" value={entry.date || today} onChange={(event) => setEntry({ ...entry, date: event.target.value })}/></label><button className="primary-btn" onClick={() => { if (!entry.title || entry.amount <= 0 || !today) return; const datedEntry = { ...entry, date: entry.date || today }; setState((current) => ({ ...current, expenses: { ...current.expenses, items: [...current.expenses.items, { ...datedEntry, id: nextId() }] } })); setEntry({ title: "", category: "Food", amount: 0, date: today }); notify("Expense stored in monthly ledger"); }}>STORE EXPENSE</button><div className="category-mini">{Object.entries(categories).map(([category, amount]) => <div key={category}><span>{category}</span><i><b style={{ width: `${Math.min(100, (amount / total) * 100)}%` }}/></i><em>{formatMoney(amount)}</em></div>)}</div></article>
     </section>
   </>;
 }
 
-function RewardModule({ state, setState, notify }: { state: LifeQuestState; setState: React.Dispatch<React.SetStateAction<LifeQuestState>>; notify: (message: string) => void }) {
+function RewardModule({ state, setState, notify, today }: { state: LifeQuestState; setState: React.Dispatch<React.SetStateAction<LifeQuestState>>; notify: (message: string) => void; today: string }) {
   const [reward, setReward] = useState({ title: "", emoji: "🎁", cost: 200, cooldown: "Once a week" });
   const [category, setCategory] = useState<"all" | StoreItem["kind"]>("all");
   const owned = state.store?.owned || ["theme-cyber", "sticker-focus"];
   const equipped = state.store?.equipped || { theme: "theme-cyber", sticker: "sticker-focus" };
+  const cooldownReady = (item: Reward) => {
+    if (item.cooldown === "Level reward") return item.redeemed === 0;
+    if (!item.lastRedeemedOn || !today) return true;
+    if (item.cooldown === "Once a week") return daysBetween(item.lastRedeemedOn, today) >= 7;
+    return item.lastRedeemedOn !== today;
+  };
   const buyOrEquip = (item: StoreItem) => {
     if (!owned.includes(item.id) && state.profile.coins < item.cost) return;
     setState((current) => {
@@ -659,12 +959,12 @@ function RewardModule({ state, setState, notify }: { state: LifeQuestState; setS
     <section className="store-toolbar"><div><span className="eyebrow">COSMETIC ARMORY</span><h2>Customize your game</h2></div><div className="store-tabs">{(["all", "theme", "sticker", "badge", "effect"] as const).map((item) => <button key={item} className={category === item ? "active" : ""} onClick={() => setCategory(item)}>{item.toUpperCase()}</button>)}</div></section>
     <section className="store-grid">{STORE_ITEMS.filter((item) => category === "all" || item.kind === category).map((item) => { const isOwned = owned.includes(item.id); const isEquipped = equipped[item.kind] === item.id; const canAfford = state.profile.coins >= item.cost; return <article className={`game-panel store-card ${item.rarity.toLowerCase()} ${isEquipped ? "equipped" : ""}`} key={item.id}><div className="store-preview"><span>{item.icon}</span><i>{item.kind}</i></div><div className="store-meta"><small>{item.rarity} {item.kind.toUpperCase()}</small><h3>{item.name}</h3><p>{item.description}</p></div><button disabled={!isOwned && !canAfford} onClick={() => buyOrEquip(item)}>{isEquipped ? "✓ EQUIPPED" : isOwned ? "EQUIP" : `◈ ${item.cost} UNLOCK`}</button></article>; })}</section>
     <div className="vault-divider"><span>REAL-LIFE REWARD VAULT</span></div>
-    <section className="reward-grid">{state.rewards.map((item) => { const canAfford = state.profile.coins >= item.cost; return <article className={`game-panel reward-card ${canAfford ? "available" : "locked"}`} key={item.id}><div className="reward-emoji">{item.emoji}</div><span>{canAfford ? "REWARD AVAILABLE" : "LOCKED"}</span><h2>{item.title}</h2><p>{item.cooldown} · Redeemed {item.redeemed} times</p><button disabled={!canAfford} onClick={() => { setState((current) => ({ ...current, profile: { ...current.profile, coins: current.profile.coins - item.cost }, rewards: current.rewards.map((rewardItem) => rewardItem.id === item.id ? { ...rewardItem, redeemed: rewardItem.redeemed + 1 } : rewardItem) })); notify(`${item.title} unlocked — enjoy it guilt-free!`); }}>◈ {item.cost} COINS</button></article>; })}</section>
+    <section className="reward-grid">{state.rewards.map((item) => { const canAfford = state.profile.coins >= item.cost; const ready = cooldownReady(item); return <article className={`game-panel reward-card ${canAfford && ready ? "available" : "locked"}`} key={item.id}><div className="reward-emoji">{item.emoji}</div><span>{ready ? canAfford ? "REWARD AVAILABLE" : "MORE COINS NEEDED" : "COOLDOWN ACTIVE"}</span><h2>{item.title}</h2><p>{item.cooldown} · Redeemed {item.redeemed} times</p><button disabled={!canAfford || !ready} onClick={() => { setState((current) => ({ ...current, profile: { ...current.profile, coins: current.profile.coins - item.cost }, rewards: current.rewards.map((rewardItem) => rewardItem.id === item.id ? { ...rewardItem, redeemed: rewardItem.redeemed + 1, lastRedeemedOn: today } : rewardItem) })); notify(`${item.title} unlocked — enjoy it guilt-free!`); }}>{ready ? `◈ ${item.cost} COINS` : "WAIT FOR COOLDOWN"}</button></article>; })}</section>
     <section className="game-panel custom-reward"><div><span className="eyebrow">CREATE YOUR OWN</span><h2>Custom reward drop</h2><p>Use rewards that refresh you without taking control of the day.</p></div><input value={reward.emoji} aria-label="Reward emoji" onChange={(event) => setReward({ ...reward, emoji: event.target.value })}/><input value={reward.title} placeholder="Reward name" onChange={(event) => setReward({ ...reward, title: event.target.value })}/><input type="number" min="10" value={reward.cost} onChange={(event) => setReward({ ...reward, cost: Number(event.target.value) })}/><select value={reward.cooldown} onChange={(event) => setReward({ ...reward, cooldown: event.target.value })}><option>Once a day</option><option>Once a week</option><option>Level reward</option></select><button className="primary-btn" onClick={() => { if (!reward.title) return; setState((current) => ({ ...current, rewards: [...current.rewards, { ...reward, id: nextId(), redeemed: 0 }] })); setReward({ title: "", emoji: "🎁", cost: 200, cooldown: "Once a week" }); }}>ADD TO VAULT</button></section>
   </>;
 }
 
-function ChangeModule({ state, setState, award }: { state: LifeQuestState; setState: React.Dispatch<React.SetStateAction<LifeQuestState>>; award: (xp: number, coins: number, message: string) => void }) {
+function ChangeModule({ state, setState, notify }: { state: LifeQuestState; setState: React.Dispatch<React.SetStateAction<LifeQuestState>>; notify: (message: string) => void }) {
   const [mode, setMode] = useState<"build" | "break">("build");
   const [draft, setDraft] = useState({ name: "", identity: "", cue: "", action: "" });
   const principles = mode === "build" ? [{ n: "01", title: "Make it obvious", text: "Attach a clear cue to an existing routine." }, { n: "02", title: "Make it tiny", text: "Start with a two-minute version to reduce friction." }, { n: "03", title: "Protect attention", text: "Use environment design, mindful restraint and a clear daily purpose." }, { n: "04", title: "Reward repetition", text: "Celebrate showing up; intensity can grow later." }] : [{ n: "01", title: "Make it invisible", text: "Remove the cue from your environment." }, { n: "02", title: "Add friction", text: "Increase the steps needed to start the unwanted action." }, { n: "03", title: "Replace, don&apos;t erase", text: "Choose a healthier response for the same trigger." }, { n: "04", title: "Recover quickly", text: "A missed day is data. Return at the next opportunity." }];
@@ -673,7 +973,7 @@ function ChangeModule({ state, setState, award }: { state: LifeQuestState; setSt
     <div className="mode-switch"><button className={mode === "build" ? "active" : ""} onClick={() => setMode("build")}>＋ BUILD A HABIT</button><button className={mode === "break" ? "active" : ""} onClick={() => setMode("break")}>− BREAK A HABIT</button></div>
     <section className="principle-grid">{principles.map((item) => <article className="game-panel" key={item.n}><span>{item.n}</span><h3>{item.title}</h3><p>{item.text}</p></article>)}</section>
     <section className="change-layout">
-      <article className="game-panel protocol-list"><div className="panel-heading"><div><span className="eyebrow">ACTIVE PROTOCOLS</span><h2>Identity quests</h2></div></div>{state.changeHabits.map((habit) => <button className={`protocol ${habit.done ? "done" : ""}`} key={habit.id} onClick={() => { if (!habit.done) award(60, 20, "Identity vote recorded"); setState((current) => ({ ...current, changeHabits: current.changeHabits.map((item) => item.id === habit.id ? { ...item, done: !item.done, streak: item.done ? item.streak - 1 : item.streak + 1 } : item) })); }}><span>{habit.type === "build" ? "+" : "−"}</span><div><strong>{habit.name}</strong><small>{habit.identity}</small><em>IF {habit.cue} → THEN {habit.action}</em></div><b>{habit.streak}<small>DAYS</small></b></button>)}</article>
+      <article className="game-panel protocol-list"><div className="panel-heading"><div><span className="eyebrow">ACTIVE PROTOCOLS</span><h2>Identity quests</h2></div></div>{state.changeHabits.map((habit) => <button className={`protocol ${habit.done ? "done" : ""}`} key={habit.id} onClick={() => { const direction = habit.done ? -1 : 1; setState((current) => ({ ...current, profile: { ...current.profile, xp: Math.max(0, current.profile.xp + (direction * 60)), coins: Math.max(0, current.profile.coins + (direction * Math.round(20 * (current.settings?.coinMultiplier || 1)))) }, changeHabits: current.changeHabits.map((item) => item.id === habit.id ? { ...item, done: !item.done, streak: item.done ? Math.max(0, item.streak - 1) : item.streak + 1 } : item) })); if (!habit.done) notify("Identity vote recorded  +60 XP"); }}><span>{habit.type === "build" ? "+" : "−"}</span><div><strong>{habit.name}</strong><small>{habit.identity}</small><em>IF {habit.cue} → THEN {habit.action}</em></div><b>{habit.streak}<small>DAYS</small></b></button>)}</article>
       <article className="game-panel form-panel"><span className="eyebrow">{mode.toUpperCase()} PROTOCOL</span><h2>Design the behaviour</h2><label>Habit<input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder={mode === "build" ? "Habit to build" : "Habit to break"}/></label><label>Identity statement<input value={draft.identity} onChange={(event) => setDraft({ ...draft, identity: event.target.value })} placeholder="I am someone who..."/></label><label>Cue / trigger<input value={draft.cue} onChange={(event) => setDraft({ ...draft, cue: event.target.value })} placeholder="When / after..."/></label><label>{mode === "build" ? "Two-minute action" : "Replacement action"}<input value={draft.action} onChange={(event) => setDraft({ ...draft, action: event.target.value })} placeholder="I will..."/></label><button className="primary-btn" onClick={() => { if (!draft.name || !draft.action) return; setState((current) => ({ ...current, changeHabits: [...current.changeHabits, { ...draft, id: nextId(), type: mode, streak: 0, done: false }] })); setDraft({ name: "", identity: "", cue: "", action: "" }); }}>ACTIVATE PROTOCOL</button></article>
     </section>
     <div className="wisdom-note"><span>✦</span><p><strong>Practice, not punishment.</strong> Traditional wellness ideas here are used as gentle routine prompts—not medical advice, moral judgment, or a substitute for professional care.</p></div>

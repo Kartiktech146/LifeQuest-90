@@ -4,8 +4,7 @@ import { userStates } from "../../../db/schema";
 import { currentUser } from "../../../lib/auth";
 
 async function userKey(request: Request) {
-  const user = await currentUser(request);
-  return user?.id ?? request.headers.get("oai-authenticated-user-email");
+  return (await currentUser(request))?.id ?? null;
 }
 
 function errorResponse(error: unknown) {
