@@ -3,16 +3,29 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const pageSource = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+const styleSource = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
 const serviceWorkerSource = await readFile(new URL("../public/sw.js", import.meta.url), "utf8");
+const authSource = await readFile(new URL("../lib/auth.ts", import.meta.url), "utf8");
 const assistantRouteSource = await readFile(new URL("../app/api/assistant/route.ts", import.meta.url), "utf8");
 const requestOtpRouteSource = await readFile(new URL("../app/api/auth/request-otp/route.ts", import.meta.url), "utf8");
 
 test("every navigation option has a rendered working module", () => {
-  const tabs = ["overview", "reset", "planner", "revision", "alarm", "gym", "expenses", "rewards", "change", "history", "settings"];
+  const tabs = ["overview", "reset", "planner", "revision", "alarm", "reminders", "gym", "expenses", "rewards", "change", "history", "settings"];
   for (const tab of tabs) assert.match(pageSource, new RegExp(`active === ["']${tab}["']`), `${tab} is not rendered`);
 
-  const modules = ["Overview", "ResetModule", "PlannerModule", "RevisionModule", "AlarmModule", "GymModule", "ExpenseModule", "RewardModule", "ChangeModule", "HistoryModule", "SettingsModule"];
+  const modules = ["Overview", "ResetModule", "PlannerModule", "RevisionModule", "AlarmModule", "ReminderModule", "GymModule", "ExpenseModule", "RewardModule", "ChangeModule", "HistoryModule", "SettingsModule"];
   for (const moduleName of modules) assert.match(pageSource, new RegExp(`function ${moduleName}\\(`), `${moduleName} is missing`);
+});
+
+test("reminders, install flow and readable mobile navigation are wired", () => {
+  assert.match(pageSource, /function isReminderDue/);
+  assert.match(pageSource, /window\.setInterval\(checkReminders,\s*15_000\)/);
+  assert.match(pageSource, /beforeinstallprompt/);
+  assert.match(pageSource, /INSTALL LIFEQUEST APP/);
+  assert.match(styleSource, /\.nav-label\{display:block;font-size:10px!important\}/);
+  assert.doesNotMatch(styleSource, /\.nav-item\{font-size:0!important/);
+  assert.match(authSource, /60 \* 60 \* 24 \* 90/);
+  assert.match(authSource, /Expires=\$\{expires\}/);
 });
 
 test("alarm has a scheduler, sound, notification and dismissal missions", () => {

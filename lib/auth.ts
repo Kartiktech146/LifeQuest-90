@@ -3,7 +3,7 @@ import { getDb } from "../db";
 import { sessions, users } from "../db/schema";
 
 export const SESSION_COOKIE = "lifequest_session";
-const SESSION_SECONDS = 60 * 60 * 24 * 30;
+const SESSION_SECONDS = 60 * 60 * 24 * 90;
 
 const bytesToHex = (bytes: Uint8Array) => Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 export const randomToken = (bytes = 32) => { const value = new Uint8Array(bytes); crypto.getRandomValues(value); return bytesToHex(value); };
@@ -21,9 +21,10 @@ export function getCookie(request: Request, name: string) {
 }
 export function sessionCookie(token: string, maxAge = SESSION_SECONDS) {
   const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
-  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure}`;
+  const expires = new Date(Date.now() + (maxAge * 1000)).toUTCString();
+  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}; Expires=${expires}${secure}`;
 }
-export function clearSessionCookie() { const secure = process.env.NODE_ENV === "production" ? "; Secure" : ""; return `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`; }
+export function clearSessionCookie() { const secure = process.env.NODE_ENV === "production" ? "; Secure" : ""; return `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT${secure}`; }
 
 export async function createSession(userId: string) {
   const token = randomToken(); const now = Date.now(); const db = await getDb();

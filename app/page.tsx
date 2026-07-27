@@ -2,11 +2,12 @@
 
 import { CSSProperties, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-type Tab = "overview" | "reset" | "planner" | "revision" | "alarm" | "gym" | "expenses" | "rewards" | "change" | "history" | "settings";
+type Tab = "overview" | "reset" | "planner" | "revision" | "alarm" | "reminders" | "gym" | "expenses" | "rewards" | "change" | "history" | "settings";
 type Task = { id: number; title: string; duration: number; priority: "High" | "Medium" | "Low"; start: string; done: boolean; xp: number };
 type Habit = { id: number; name: string; streak: number; done: boolean; reward: number };
 type Revision = { id: number; title: string; url: string; nextReview: string; reviewDate?: string; mastery: number; level: number; done: boolean };
 type Alarm = { id: number; time: string; label: string; mission: string; enabled: boolean };
+type Reminder = { id: number; title: string; date: string; time: string; repeat: "once" | "daily"; enabled: boolean };
 type Expense = { id: number; title: string; category: string; amount: number; date: string };
 type Reward = { id: number; title: string; emoji: string; cost: number; cooldown: string; redeemed: number; lastRedeemedOn?: string };
 type StoreItem = { id: string; name: string; icon: string; kind: "theme" | "sticker" | "badge" | "effect"; cost: number; rarity: "COMMON" | "RARE" | "EPIC" | "LEGENDARY"; description: string; theme?: "cyber" | "royal" | "stealth" };
@@ -18,6 +19,10 @@ type Recommendation = { code: string; title: string; detail: string; action: str
 type DayLog = { date: string; tasks: { title: string; done: boolean }[]; habits: { title: string; done: boolean }[] };
 type AppAccount = { id: string; name: string; method: "mobile" | "google"; label: string; createdAt?: string };
 type AlarmPermission = NotificationPermission | "unsupported";
+type InstallPromptEvent = Event & {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
+};
 
 type LifeQuestState = {
   profile: {
@@ -34,6 +39,7 @@ type LifeQuestState = {
   habits: Habit[];
   revisions: Revision[];
   alarms: Alarm[];
+  reminders: Reminder[];
   expenses: { budget: number; items: Expense[] };
   rewards: Reward[];
   store?: { owned: string[]; equipped: Partial<Record<StoreItem["kind"], string>> };
@@ -160,6 +166,7 @@ function createInitialState(name = "Player", startedOn = ""): LifeQuestState {
     alarms: [
       { id: 1, time: "07:00", label: "Start the day", mission: "Open LifeQuest", enabled: false },
     ],
+    reminders: [],
     expenses: { budget: 0, items: [] },
     rewards: [
       { id: 1, title: "Take a guilt-free break", emoji: "☕", cost: 100, cooldown: "Once a day", redeemed: 0 },
@@ -219,6 +226,16 @@ function isAlarmDue(alarm: Alarm, now: Date) {
   return alarm.enabled && elapsed >= 0 && elapsed < 5;
 }
 
+function isReminderDue(reminder: Reminder, now: Date) {
+  if (!reminder.enabled) return false;
+  const today = localDateKey(now);
+  if (reminder.repeat === "once" && reminder.date !== today) return false;
+  if (reminder.repeat === "daily" && reminder.date && reminder.date > today) return false;
+  const currentMinutes = (now.getHours() * 60) + now.getMinutes();
+  const elapsed = currentMinutes - alarmMinutes(reminder.time);
+  return elapsed >= 0 && elapsed < 5;
+}
+
 function isLegacyDemoState(state: LifeQuestState, account: AppAccount) {
   const accountLooksLikeKartik = account.name.trim().toLowerCase().startsWith("kartik");
   return !accountLooksLikeKartik
@@ -233,6 +250,7 @@ const NAV: { id: Tab; icon: string; label: string }[] = [
   { id: "planner", icon: "⚡", label: "Planner & Habits" },
   { id: "revision", icon: "◫", label: "Revision Arena" },
   { id: "alarm", icon: "◉", label: "Smart Alarm" },
+  { id: "reminders", icon: "🔔", label: "Reminders" },
   { id: "gym", icon: "◆", label: "Gym Planner" },
   { id: "expenses", icon: "₹", label: "Expenses" },
   { id: "rewards", icon: "◈", label: "Coin Store" },
@@ -311,6 +329,11 @@ export default function Home() {
   const alarmPulseTimer = useRef<number | null>(null);
   const [ringingAlarm, setRingingAlarm] = useState<Alarm | null>(null);
   const [alarmPermission, setAlarmPermission] = useState<AlarmPermission>(() => typeof window !== "undefined" && "Notification" in window ? Notification.permission : "unsupported");
+  const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(null);
+  const [isInstalled, setIsInstalled] = useState(() => typeof window !== "undefined" && (
+    window.matchMedia("(display-mode: standalone)").matches
+    || Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone)
+  ));
   const [toast, setToast] = useState("");
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [assistantPrompt, setAssistantPrompt] = useState("");
@@ -409,6 +432,27 @@ export default function Home() {
     }
   }, [startAlarmSound, state.settings.sound]);
 
+  const triggerReminder = useCallback((reminder: Reminder) => {
+    notify(`Reminder: ${reminder.title}`);
+    if ("Notification" in window && Notification.permission === "granted") {
+      const options: NotificationOptions = {
+        body: reminder.repeat === "daily" ? `Daily reminder · ${reminder.time}` : `${reminder.date} · ${reminder.time}`,
+        icon: "/icons/icon-192.png",
+        badge: "/icons/icon-192.png",
+        tag: `lifequest-reminder-${reminder.id}`,
+        requireInteraction: true,
+        data: { url: "/" },
+      };
+      if ("serviceWorker" in navigator) {
+        void navigator.serviceWorker.ready
+          .then((registration) => registration.showNotification(reminder.title, options))
+          .catch(() => new Notification(reminder.title, options));
+      } else {
+        new Notification(reminder.title, options);
+      }
+    }
+  }, [notify]);
+
   useEffect(() => {
     const updateClock = () => {
       const next = new Date();
@@ -418,6 +462,23 @@ export default function Home() {
     updateClock();
     const timer = window.setInterval(updateClock, 30_000);
     return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const captureInstall = (event: Event) => {
+      event.preventDefault();
+      setInstallPrompt(event as InstallPromptEvent);
+    };
+    const markInstalled = () => {
+      setIsInstalled(true);
+      setInstallPrompt(null);
+    };
+    window.addEventListener("beforeinstallprompt", captureInstall);
+    window.addEventListener("appinstalled", markInstalled);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", captureInstall);
+      window.removeEventListener("appinstalled", markInstalled);
+    };
   }, []);
 
   useEffect(() => {
@@ -466,7 +527,7 @@ export default function Home() {
         const savedState = payload.state as LifeQuestState | null;
         const hasPersonalState = Boolean(savedState && !isLegacyDemoState(savedState, account));
         const nextState = hasPersonalState
-          ? syncStateToDate(savedState!, todayKey, startedOn)
+          ? syncStateToDate({ ...savedState!, reminders: savedState!.reminders || [] }, todayKey, startedOn)
           : freshState;
         loadedAccountId.current = account.id;
         setState(nextState);
@@ -512,6 +573,26 @@ export default function Home() {
     return () => window.clearInterval(timer);
   }, [account, hydrated, state.alarms, triggerAlarm]);
 
+  useEffect(() => {
+    if (!hydrated || !account) return;
+    const checkReminders = () => {
+      const now = new Date();
+      const due = (state.reminders || []).find((reminder) => isReminderDue(reminder, now));
+      if (!due) return;
+      const reminderKey = `${localDateKey(now)}:${due.id}:${due.time}`;
+      const storageKey = `lifequest-last-reminder-${account.id}`;
+      if (window.localStorage.getItem(storageKey) === reminderKey) return;
+      window.localStorage.setItem(storageKey, reminderKey);
+      triggerReminder(due);
+      if (due.repeat === "once") {
+        setState((current) => ({ ...current, reminders: (current.reminders || []).map((item) => item.id === due.id ? { ...item, enabled: false } : item) }));
+      }
+    };
+    checkReminders();
+    const timer = window.setInterval(checkReminders, 15_000);
+    return () => window.clearInterval(timer);
+  }, [account, hydrated, state.reminders, triggerReminder]);
+
   const dismissAlarm = useCallback(() => {
     stopAlarmSound();
     setRingingAlarm(null);
@@ -522,6 +603,26 @@ export default function Home() {
     await prepareAlarmAlerts();
     triggerAlarm(alarm || { id: -1, time: new Date().toTimeString().slice(0, 5), label: "Alarm sound test", mission: "Math challenge", enabled: true }, true);
   }, [prepareAlarmAlerts, triggerAlarm]);
+
+  const installApp = useCallback(async () => {
+    if (isInstalled) {
+      notify("LifeQuest is already installed on this device");
+      return;
+    }
+    if (!installPrompt) {
+      notify("Use your browser menu and choose Add to Home screen / Install app");
+      return;
+    }
+    await installPrompt.prompt();
+    const choice = await installPrompt.userChoice;
+    if (choice.outcome === "accepted") {
+      setIsInstalled(true);
+      notify("LifeQuest app installed");
+    } else {
+      notify("Installation cancelled");
+    }
+    setInstallPrompt(null);
+  }, [installPrompt, isInstalled, notify]);
 
   const award = (xp: number, coins: number, message: string) => {
     const rewardedCoins = Math.round(coins * (state.settings?.coinMultiplier || 1));
@@ -600,7 +701,7 @@ export default function Home() {
     <main className={`app-shell theme-${state.settings?.theme || "cyber"} ${state.settings?.compact ? "compact-mode" : ""}`}>
       <div className="world-fog fog-one"/><div className="world-fog fog-two"/><div className="hud-scanlines"/>
       {toast && <div className="toast"><span>◆</span>{toast}</div>}
-      {!account && <LoginGate onLogin={(next) => {
+      {!account && <LoginGate isInstalled={isInstalled} installApp={installApp} onLogin={(next) => {
         const startedOn = next.createdAt ? localDateKey(new Date(next.createdAt)) : localDateKey(new Date());
         loadedAccountId.current = null;
         setState(createInitialState(next.name, startedOn));
@@ -611,7 +712,7 @@ export default function Home() {
       <aside className="sidebar">
         <button className="brand" onClick={() => setActive("overview")}><span className="brand-mark">LQ</span><span>LIFEQUEST<small>90</small></span></button>
         <nav className="nav-list" aria-label="Main navigation">
-          {NAV.map((item) => <button key={item.id} onClick={() => setActive(item.id)} className={active === item.id ? "nav-item active" : "nav-item"}><span>{item.icon}</span>{item.label}</button>)}
+          {NAV.map((item) => <button key={item.id} onClick={() => setActive(item.id)} className={active === item.id ? "nav-item active" : "nav-item"}><span className="nav-icon">{item.icon}</span><span className="nav-label">{item.label}</span></button>)}
         </nav>
         <div className={`player-card ${equippedEffect ? "cosmetic-effect" : ""}`}>
           <div className="avatar">{playerInitials(state.profile.name)}</div>
@@ -632,6 +733,7 @@ export default function Home() {
           {active === "planner" && <PlannerModule state={state} setState={setState} toggleTask={toggleTask} toggleHabit={toggleHabit} notify={notify} />}
           {active === "revision" && <RevisionModule state={state} setState={setState} award={award} today={today} />}
           {active === "alarm" && <AlarmModule state={state} setState={setState} notify={notify} permission={alarmPermission} prepareAlerts={prepareAlarmAlerts} testAlarm={testAlarm} />}
+          {active === "reminders" && <ReminderModule state={state} setState={setState} notify={notify} permission={alarmPermission} prepareAlerts={prepareAlarmAlerts} today={today} />}
           {active === "gym" && <GymModule state={state} setState={setState} award={award} currentDayCode={currentDayCode} />}
           {active === "expenses" && <ExpenseModule state={state} setState={setState} total={expenseTotal} notify={notify} today={today} />}
           {active === "rewards" && <RewardModule state={state} setState={setState} notify={notify} today={today} />}
@@ -646,7 +748,7 @@ export default function Home() {
             setAccount(null);
             setState(createInitialState());
             setActive("overview");
-          }} notify={notify} today={today} />}
+          }} notify={notify} today={today} isInstalled={isInstalled} installApp={installApp} />}
         </div>
       </section>
       <button className={`ai-companion ${assistantOpen ? "active" : ""}`} onClick={() => setAssistantOpen((open) => !open)} aria-label="Open Quest AI assistant"><span className="ai-core">AI</span><i/><b>ASK QUEST AI</b></button>
@@ -663,7 +765,7 @@ export default function Home() {
   );
 }
 
-function LoginGate({ onLogin }: { onLogin: (account: AppAccount) => void }) {
+function LoginGate({ onLogin, isInstalled, installApp }: { onLogin: (account: AppAccount) => void; isInstalled: boolean; installApp: () => Promise<void> }) {
   const [mode, setMode] = useState<"choose" | "mobile" | "otp" | "google">("choose");
   const [mobile, setMobile] = useState("");
   const [otp, setOtp] = useState("");
@@ -713,7 +815,7 @@ function LoginGate({ onLogin }: { onLogin: (account: AppAccount) => void }) {
     onLogin(payload.user);
   };
   return <div className="login-gate"><section className="login-card game-panel"><div className="login-emblem">LQ<span>90</span></div><span className="eyebrow">PLAYER AUTHENTICATION</span><h1>ENTER LIFEQUEST</h1><p>Your missions, progress, rewards and settings stay linked to your player profile.</p>
-    {mode === "choose" && <div className="login-actions"><button className="google-login" onClick={() => setMode("google")}><b>G</b> Login with Gmail OTP</button><button className="mobile-login" onClick={() => setMode("mobile")}><b>▣</b> Login using mobile OTP</button></div>}
+    {mode === "choose" && <div className="login-actions"><button className="google-login" onClick={() => setMode("google")}><b>G</b> Login with Gmail OTP</button><button className="mobile-login" onClick={() => setMode("mobile")}><b>▣</b> Login using mobile OTP</button><button className="install-login" onClick={() => void installApp()}>{isInstalled ? "✓ LIFEQUEST APP INSTALLED" : "⬇ INSTALL LIFEQUEST APP"}</button><small className="login-persistence">Install from the deployed website and stay signed in for up to 90 days on this device.</small></div>}
     {mode === "mobile" && <div className="login-form"><label>PLAYER NAME<input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name"/></label><label>MOBILE NUMBER<div className="phone-input"><span>+91</span><input inputMode="numeric" maxLength={10} value={mobile} onChange={(e) => setMobile(e.target.value.replace(/\D/g, ""))} placeholder="10-digit number"/></div></label><small>{status || "A one-time code will be sent securely by SMS."}</small><button className="glow-btn full" disabled={mobile.length !== 10 || requestingOtp} onClick={() => void requestOtp("mobile")}>{requestingOtp ? "SENDING…" : "SEND OTP"}</button><button className="text-button" onClick={() => setMode("choose")}>← Back</button></div>}
     {mode === "otp" && <div className="login-form"><label>ENTER OTP<input inputMode="numeric" maxLength={6} value={otp} onChange={(e) => setOtp(e.target.value.replace(/\D/g, ""))} placeholder="6-digit OTP"/></label><small>{status}</small><button className="glow-btn full" disabled={otp.length !== 6} onClick={() => void verifyOtp()}>VERIFY & START</button><button className="resend-otp" disabled={resendIn > 0 || requestingOtp} onClick={() => void requestOtp(pendingMethod)}>{requestingOtp ? "SENDING…" : resendIn > 0 ? `RESEND ${pendingMethod === "google" ? "GMAIL" : "MOBILE"} OTP IN ${resendIn}s` : `RESEND ${pendingMethod === "google" ? "GMAIL" : "MOBILE"} OTP`}</button><button className="text-button" onClick={() => setMode(pendingMethod === "mobile" ? "mobile" : "google")}>← Change destination</button></div>}
     {mode === "google" && <div className="login-form"><label>PLAYER NAME<input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name"/></label><label>GMAIL ADDRESS<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@gmail.com"/></label><small>{status || "A one-time code will be sent securely through Gmail."}</small><button className="google-login" disabled={!email.includes("@") || requestingOtp} onClick={() => void requestOtp("google")}><b>G</b> {requestingOtp ? "SENDING…" : "SEND GMAIL OTP"}</button><button className="text-button" onClick={() => setMode("choose")}>← Back</button></div>}
@@ -735,7 +837,7 @@ function HistoryModule({ state, today }: { state: LifeQuestState; today: string 
   </>;
 }
 
-function SettingsModule({ state, setState, account, logout, notify, today }: { state: LifeQuestState; setState: React.Dispatch<React.SetStateAction<LifeQuestState>>; account: AppAccount | null; logout: () => void; notify: (message: string) => void; today: string }) {
+function SettingsModule({ state, setState, account, logout, notify, today, isInstalled, installApp }: { state: LifeQuestState; setState: React.Dispatch<React.SetStateAction<LifeQuestState>>; account: AppAccount | null; logout: () => void; notify: (message: string) => void; today: string; isInstalled: boolean; installApp: () => Promise<void> }) {
   const settings = state.settings || DEFAULT_STATE.settings;
   const resetToday = () => { if (!window.confirm("Reset all task and habit checkmarks for today?")) return; setState((s) => ({ ...s, tasks: s.tasks.map((x) => ({ ...x, done: false })), habits: s.habits.map((x) => ({ ...x, done: false })), revisions: s.revisions.map((x) => ({ ...x, done: false })), changeHabits: s.changeHabits.map((x) => ({ ...x, done: false })) })); notify("Today's mission status reset"); };
   const resetJourney = () => { if (!window.confirm("Restart the 90-day journey from Day 1? Your custom tasks and expenses will stay.")) return; setState((s) => ({ ...s, profile: { ...s.profile, day: 1, xp: 0, coins: 0, streak: 0, journeyStartedOn: today || s.profile.journeyStartedOn, lastActiveDate: today || s.profile.lastActiveDate } })); notify("90-day campaign restarted"); };
@@ -746,6 +848,7 @@ function SettingsModule({ state, setState, account, logout, notify, today }: { s
     <section className="settings-grid"><article className="game-panel setting-card"><span className="eyebrow">PLAYER PROFILE</span><h2>{state.profile.name}</h2><p>{account?.method === "google" ? "Gmail OTP profile" : "Mobile OTP profile"} · {account?.label}</p><p>90-day journey started: {state.profile.journeyStartedOn ? dateFromKey(state.profile.journeyStartedOn).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" }) : "Syncing…"}</p><label>Display name<input value={state.profile.name} onChange={(e) => setState((s) => ({ ...s, profile: { ...s.profile, name: e.target.value } }))}/></label><button className="secondary-btn" onClick={logout}>LOG OUT</button></article>
       <article className="game-panel setting-card"><span className="eyebrow">GAME EXPERIENCE</span><h2>Interface loadout</h2><label>Theme<select value={settings.theme} onChange={(e) => update({ theme: e.target.value as LifeQuestState["settings"]["theme"] })}><option value="cyber">Cyber Cyan</option><option value="royal">Royal Purple</option><option value="stealth">Stealth Red</option></select></label><div className="setting-toggle"><span><strong>Compact dashboard</strong><small>Fit more missions on screen</small></span><button className={`toggle ${settings.compact ? "on" : ""}`} onClick={() => update({ compact: !settings.compact })}><i/></button></div><div className="setting-toggle"><span><strong>Alarm sound</strong><small>Play the repeating wake-up tone</small></span><button className={`toggle ${settings.sound ? "on" : ""}`} onClick={() => update({ sound: !settings.sound })}><i/></button></div></article>
       <article className="game-panel setting-card"><span className="eyebrow">GAME RULES</span><h2>Your difficulty</h2><label>Daily priority mission goal<input type="number" min="1" max="12" value={settings.dailyGoal} onChange={(e) => update({ dailyGoal: Number(e.target.value) })}/></label><label>Coin reward multiplier<select value={settings.coinMultiplier} onChange={(e) => update({ coinMultiplier: Number(e.target.value) })}><option value={0.5}>0.5× Hard</option><option value={1}>1× Balanced</option><option value={1.5}>1.5× Boosted</option></select></label><p className="info-chip">You can also customize habits, missions, rewards, alarms and gym days inside their own modules.</p></article>
+      <article className="game-panel setting-card"><span className="eyebrow">MOBILE & DESKTOP APP</span><h2>{isInstalled ? "LifeQuest is installed" : "Install LifeQuest"}</h2><p>Open it from your Android, iPhone, Windows or Mac home screen like an app. Your secure session stays signed in for up to 90 days.</p><button className="glow-btn full" onClick={() => void installApp()}>{isInstalled ? "✓ APP INSTALLED" : "INSTALL / ADD TO HOME SCREEN"}</button><p className="info-chip">On iPhone: Safari → Share → Add to Home Screen. On Android/desktop: browser menu → Install app.</p></article>
       <article className="game-panel setting-card danger-zone"><span className="eyebrow">RESET ZONE</span><h2>Reset controls</h2><button onClick={resetToday}>RESET TODAY&apos;S CHECKMARKS <small>Keep all tasks, clear completion only</small></button><button onClick={resetJourney}>RESTART 90-DAY JOURNEY <small>Keep personal plans and expenses</small></button><button className="danger" onClick={factoryReset}>FACTORY RESET APP <small>Clear all customized profile data</small></button><button className="danger" onClick={() => void deleteAccount()}>DELETE ACCOUNT <small>Permanently erase profile, progress and sessions</small></button></article></section>
   </>;
 }
@@ -898,6 +1001,44 @@ function AlarmMission({ alarm, dismiss, notify }: { alarm: Alarm; dismiss: () =>
       <button className="glow-btn full" onClick={dismiss}>I&apos;M AWAKE — DISMISS</button>
     </>}
   </section></div>;
+}
+
+function ReminderModule({ state, setState, notify, permission, prepareAlerts, today }: {
+  state: LifeQuestState;
+  setState: React.Dispatch<React.SetStateAction<LifeQuestState>>;
+  notify: (message: string) => void;
+  permission: AlarmPermission;
+  prepareAlerts: () => Promise<AlarmPermission>;
+  today: string;
+}) {
+  const [draft, setDraft] = useState<Pick<Reminder, "title" | "date" | "time" | "repeat">>({
+    title: "",
+    date: today,
+    time: "09:00",
+    repeat: "once",
+  });
+  const reminders = state.reminders || [];
+  const addReminder = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!draft.title.trim() || !draft.time || !draft.date) {
+      notify("Add a title, date and time");
+      return;
+    }
+    await prepareAlerts();
+    setState((current) => ({
+      ...current,
+      reminders: [...(current.reminders || []), { ...draft, title: draft.title.trim(), id: nextId(), enabled: true }],
+    }));
+    setDraft((current) => ({ ...current, title: "" }));
+    notify("Reminder saved to your profile");
+  };
+  return <>
+    <ModuleHeader code="REMINDER CENTER // PERSONAL SCHEDULE" title="Remember what matters." text="Create one-time or daily reminders. They sync with your LifeQuest profile across signed-in devices." stat={`${reminders.filter((item) => item.enabled).length} ACTIVE`} />
+    <section className="reminder-layout">
+      <article className="game-panel form-panel"><span className="eyebrow">NEW REMINDER</span><h2>Schedule a notification</h2><form onSubmit={(event) => void addReminder(event)}><label>Reminder title<input value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="e.g. Take medicine"/></label><div className="form-row reminder-form-row"><label>Date<input type="date" min={today || undefined} value={draft.date} onChange={(event) => setDraft({ ...draft, date: event.target.value })}/></label><label>Time<input type="time" value={draft.time} onChange={(event) => setDraft({ ...draft, time: event.target.value })}/></label><label>Repeat<select value={draft.repeat} onChange={(event) => setDraft({ ...draft, repeat: event.target.value as Reminder["repeat"] })}><option value="once">Once</option><option value="daily">Every day</option></select></label></div><button className="primary-btn" type="submit">SAVE REMINDER</button></form><button className="secondary-btn full" onClick={async () => { const result = await prepareAlerts(); notify(result === "granted" ? "Reminder notifications enabled" : "Allow notifications in browser settings"); }}>ENABLE NOTIFICATIONS</button><p className="info-chip">For reliable background reminders, install the PWA and allow notifications. Phone battery-saving rules may still pause a closed web app.</p></article>
+      <article className="game-panel reminder-list"><div className="panel-heading"><div><span className="eyebrow">YOUR SCHEDULE</span><h2>Upcoming reminders</h2></div><span className={`count-chip ${permission === "granted" ? "" : "warning"}`}>{permission === "granted" ? "NOTIFICATIONS READY" : "ENABLE NOTIFICATIONS"}</span></div>{reminders.length === 0 && <div className="empty-state"><b>No reminders yet</b><span>Add your first reminder from the form.</span></div>}{[...reminders].sort((a, b) => `${a.date}${a.time}`.localeCompare(`${b.date}${b.time}`)).map((item) => <div className="reminder-row" key={item.id}><div className="reminder-date"><time>{item.time}</time><span>{item.repeat === "daily" ? "EVERY DAY" : item.date ? dateFromKey(item.date).toLocaleDateString("en-IN", { day: "numeric", month: "short" }).toUpperCase() : "ONCE"}</span></div><div><strong>{item.title}</strong><small>{item.enabled ? "Scheduled" : "Paused"}</small></div><div className="alarm-actions"><button className={`toggle ${item.enabled ? "on" : ""}`} aria-label={`${item.enabled ? "Pause" : "Enable"} ${item.title}`} onClick={async () => { if (!item.enabled) await prepareAlerts(); setState((current) => ({ ...current, reminders: (current.reminders || []).map((reminder) => reminder.id === item.id ? { ...reminder, enabled: !reminder.enabled } : reminder) })); }}><i/></button><button className="alarm-delete" aria-label={`Delete ${item.title}`} onClick={() => setState((current) => ({ ...current, reminders: (current.reminders || []).filter((reminder) => reminder.id !== item.id) }))}>×</button></div></div>)}</article>
+    </section>
+  </>;
 }
 
 function GymModule({ state, setState, award, currentDayCode }: { state: LifeQuestState; setState: React.Dispatch<React.SetStateAction<LifeQuestState>>; award: (xp: number, coins: number, message: string) => void; currentDayCode: string }) {

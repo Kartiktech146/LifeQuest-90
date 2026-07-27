@@ -1,4 +1,4 @@
-const CACHE_VERSION = "lifequest-90-v2";
+const CACHE_VERSION = "lifequest-90-v3";
 const APP_SHELL = [
   "/",
   "/offline.html",
