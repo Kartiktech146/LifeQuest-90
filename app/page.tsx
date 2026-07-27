@@ -23,6 +23,17 @@ type InstallPromptEvent = Event & {
   prompt: () => Promise<void>;
   userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
 };
+type InstallPlatform = "ios" | "android" | "desktop" | "other";
+type InstallWindow = Window & { lifeQuestInstallPrompt?: InstallPromptEvent };
+
+function detectInstallPlatform(): InstallPlatform {
+  if (typeof navigator === "undefined") return "other";
+  const agent = navigator.userAgent.toLowerCase();
+  if (/iphone|ipad|ipod/.test(agent)) return "ios";
+  if (/android/.test(agent)) return "android";
+  if (/windows|macintosh|linux/.test(agent)) return "desktop";
+  return "other";
+}
 
 type LifeQuestState = {
   profile: {
@@ -329,7 +340,10 @@ export default function Home() {
   const alarmPulseTimer = useRef<number | null>(null);
   const [ringingAlarm, setRingingAlarm] = useState<Alarm | null>(null);
   const [alarmPermission, setAlarmPermission] = useState<AlarmPermission>(() => typeof window !== "undefined" && "Notification" in window ? Notification.permission : "unsupported");
-  const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(null);
+  const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(() => (
+    typeof window === "undefined" ? null : (window as InstallWindow).lifeQuestInstallPrompt || null
+  ));
+  const [installGuide, setInstallGuide] = useState<InstallPlatform | null>(null);
   const [isInstalled, setIsInstalled] = useState(() => typeof window !== "undefined" && (
     window.matchMedia("(display-mode: standalone)").matches
     || Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone)
@@ -469,14 +483,20 @@ export default function Home() {
       event.preventDefault();
       setInstallPrompt(event as InstallPromptEvent);
     };
+    const capturePreparedInstall = () => {
+      setInstallPrompt((window as InstallWindow).lifeQuestInstallPrompt || null);
+    };
     const markInstalled = () => {
       setIsInstalled(true);
       setInstallPrompt(null);
+      setInstallGuide(null);
     };
     window.addEventListener("beforeinstallprompt", captureInstall);
+    window.addEventListener("lifequest-install-ready", capturePreparedInstall);
     window.addEventListener("appinstalled", markInstalled);
     return () => {
       window.removeEventListener("beforeinstallprompt", captureInstall);
+      window.removeEventListener("lifequest-install-ready", capturePreparedInstall);
       window.removeEventListener("appinstalled", markInstalled);
     };
   }, []);
@@ -610,18 +630,25 @@ export default function Home() {
       return;
     }
     if (!installPrompt) {
-      notify("Use your browser menu and choose Add to Home screen / Install app");
+      setInstallGuide(detectInstallPlatform());
       return;
     }
-    await installPrompt.prompt();
-    const choice = await installPrompt.userChoice;
-    if (choice.outcome === "accepted") {
-      setIsInstalled(true);
-      notify("LifeQuest app installed");
-    } else {
-      notify("Installation cancelled");
+    try {
+      await installPrompt.prompt();
+      const choice = await installPrompt.userChoice;
+      if (choice.outcome === "accepted") {
+        setIsInstalled(true);
+        notify("LifeQuest app installed");
+      } else {
+        notify("Installation cancelled");
+      }
+      delete (window as InstallWindow).lifeQuestInstallPrompt;
+      setInstallPrompt(null);
+    } catch {
+      delete (window as InstallWindow).lifeQuestInstallPrompt;
+      setInstallPrompt(null);
+      setInstallGuide(detectInstallPlatform());
     }
-    setInstallPrompt(null);
   }, [installPrompt, isInstalled, notify]);
 
   const award = (xp: number, coins: number, message: string) => {
@@ -701,7 +728,7 @@ export default function Home() {
     <main className={`app-shell theme-${state.settings?.theme || "cyber"} ${state.settings?.compact ? "compact-mode" : ""}`}>
       <div className="world-fog fog-one"/><div className="world-fog fog-two"/><div className="hud-scanlines"/>
       {toast && <div className="toast"><span>◆</span>{toast}</div>}
-      {!account && <LoginGate isInstalled={isInstalled} installApp={installApp} onLogin={(next) => {
+      {!account && <LoginGate onLogin={(next) => {
         const startedOn = next.createdAt ? localDateKey(new Date(next.createdAt)) : localDateKey(new Date());
         loadedAccountId.current = null;
         setState(createInitialState(next.name, startedOn));
@@ -748,7 +775,7 @@ export default function Home() {
             setAccount(null);
             setState(createInitialState());
             setActive("overview");
-          }} notify={notify} today={today} isInstalled={isInstalled} installApp={installApp} />}
+          }} notify={notify} today={today} isInstalled={isInstalled} canInstall={Boolean(installPrompt)} installApp={installApp} />}
         </div>
       </section>
       <button className={`ai-companion ${assistantOpen ? "active" : ""}`} onClick={() => setAssistantOpen((open) => !open)} aria-label="Open Quest AI assistant"><span className="ai-core">AI</span><i/><b>ASK QUEST AI</b></button>
@@ -760,12 +787,13 @@ export default function Home() {
         <form className="assistant-input" onSubmit={(event) => { event.preventDefault(); void askAssistant(); }}><input value={assistantPrompt} onChange={(event) => setAssistantPrompt(event.target.value)} placeholder="Ask anything in Hindi, Hinglish or English..." aria-label="Message Quest AI" disabled={assistantThinking}/><button type="submit" disabled={assistantThinking}>{assistantThinking ? "THINKING" : "SEND"}</button></form>
         <small className="assistant-note">Real AI + private app context. App-changing actions always require confirmation.</small>
       </aside>
+      {installGuide && <InstallAppGuide platform={installGuide} close={() => setInstallGuide(null)} />}
       {ringingAlarm && <AlarmMission key={`${ringingAlarm.id}-${ringingAlarm.time}`} alarm={ringingAlarm} dismiss={dismissAlarm} notify={notify} />}
     </main>
   );
 }
 
-function LoginGate({ onLogin, isInstalled, installApp }: { onLogin: (account: AppAccount) => void; isInstalled: boolean; installApp: () => Promise<void> }) {
+function LoginGate({ onLogin }: { onLogin: (account: AppAccount) => void }) {
   const [mode, setMode] = useState<"choose" | "mobile" | "otp" | "google">("choose");
   const [mobile, setMobile] = useState("");
   const [otp, setOtp] = useState("");
@@ -815,7 +843,7 @@ function LoginGate({ onLogin, isInstalled, installApp }: { onLogin: (account: Ap
     onLogin(payload.user);
   };
   return <div className="login-gate"><section className="login-card game-panel"><div className="login-emblem">LQ<span>90</span></div><span className="eyebrow">PLAYER AUTHENTICATION</span><h1>ENTER LIFEQUEST</h1><p>Your missions, progress, rewards and settings stay linked to your player profile.</p>
-    {mode === "choose" && <div className="login-actions"><button className="google-login" onClick={() => setMode("google")}><b>G</b> Login with Gmail OTP</button><button className="mobile-login" onClick={() => setMode("mobile")}><b>▣</b> Login using mobile OTP</button><button className="install-login" onClick={() => void installApp()}>{isInstalled ? "✓ LIFEQUEST APP INSTALLED" : "⬇ INSTALL LIFEQUEST APP"}</button><small className="login-persistence">Install from the deployed website and stay signed in for up to 90 days on this device.</small></div>}
+    {mode === "choose" && <div className="login-actions"><button className="google-login" onClick={() => setMode("google")}><b>G</b> Login with Gmail OTP</button><button className="mobile-login" onClick={() => setMode("mobile")}><b>▣</b> Login using mobile OTP</button></div>}
     {mode === "mobile" && <div className="login-form"><label>PLAYER NAME<input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name"/></label><label>MOBILE NUMBER<div className="phone-input"><span>+91</span><input inputMode="numeric" maxLength={10} value={mobile} onChange={(e) => setMobile(e.target.value.replace(/\D/g, ""))} placeholder="10-digit number"/></div></label><small>{status || "A one-time code will be sent securely by SMS."}</small><button className="glow-btn full" disabled={mobile.length !== 10 || requestingOtp} onClick={() => void requestOtp("mobile")}>{requestingOtp ? "SENDING…" : "SEND OTP"}</button><button className="text-button" onClick={() => setMode("choose")}>← Back</button></div>}
     {mode === "otp" && <div className="login-form"><label>ENTER OTP<input inputMode="numeric" maxLength={6} value={otp} onChange={(e) => setOtp(e.target.value.replace(/\D/g, ""))} placeholder="6-digit OTP"/></label><small>{status}</small><button className="glow-btn full" disabled={otp.length !== 6} onClick={() => void verifyOtp()}>VERIFY & START</button><button className="resend-otp" disabled={resendIn > 0 || requestingOtp} onClick={() => void requestOtp(pendingMethod)}>{requestingOtp ? "SENDING…" : resendIn > 0 ? `RESEND ${pendingMethod === "google" ? "GMAIL" : "MOBILE"} OTP IN ${resendIn}s` : `RESEND ${pendingMethod === "google" ? "GMAIL" : "MOBILE"} OTP`}</button><button className="text-button" onClick={() => setMode(pendingMethod === "mobile" ? "mobile" : "google")}>← Change destination</button></div>}
     {mode === "google" && <div className="login-form"><label>PLAYER NAME<input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name"/></label><label>GMAIL ADDRESS<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@gmail.com"/></label><small>{status || "A one-time code will be sent securely through Gmail."}</small><button className="google-login" disabled={!email.includes("@") || requestingOtp} onClick={() => void requestOtp("google")}><b>G</b> {requestingOtp ? "SENDING…" : "SEND GMAIL OTP"}</button><button className="text-button" onClick={() => setMode("choose")}>← Back</button></div>}
@@ -837,7 +865,46 @@ function HistoryModule({ state, today }: { state: LifeQuestState; today: string 
   </>;
 }
 
-function SettingsModule({ state, setState, account, logout, notify, today, isInstalled, installApp }: { state: LifeQuestState; setState: React.Dispatch<React.SetStateAction<LifeQuestState>>; account: AppAccount | null; logout: () => void; notify: (message: string) => void; today: string; isInstalled: boolean; installApp: () => Promise<void> }) {
+function InstallAppGuide({ platform, close }: { platform: InstallPlatform; close: () => void }) {
+  const instructions: Record<InstallPlatform, { title: string; intro: string; steps: string[] }> = {
+    ios: {
+      title: "Install on iPhone or iPad",
+      intro: "Apple requires this action from Safari; a website cannot open the iOS install menu automatically.",
+      steps: ["Open LifeQuest in Safari.", "Tap the Share icon at the bottom of Safari.", "Choose Add to Home Screen.", "Tap Add to finish."],
+    },
+    android: {
+      title: "Install on Android",
+      intro: "If Chrome does not show its automatic install prompt, use the browser menu.",
+      steps: ["Open LifeQuest in Chrome.", "Tap the three-dot menu.", "Choose Install app or Add to Home screen.", "Confirm Install."],
+    },
+    desktop: {
+      title: "Install on this computer",
+      intro: "Chrome and Edge can install LifeQuest as a standalone desktop app.",
+      steps: ["Open LifeQuest in Chrome or Edge.", "Click the install icon in the address bar, or open the browser menu.", "Choose Install LifeQuest.", "Confirm Install."],
+    },
+    other: {
+      title: "Add LifeQuest to your device",
+      intro: "Installation controls depend on your browser.",
+      steps: ["Open the browser menu.", "Choose Install app or Add to Home screen.", "Confirm the installation.", "If the option is missing, reopen this page in Chrome, Edge or Safari."],
+    },
+  };
+  const guide = instructions[platform];
+  return <div className="install-guide-backdrop" role="dialog" aria-modal="true" aria-labelledby="install-guide-title">
+    <section className="install-guide game-panel">
+      <button className="install-guide-close" onClick={close} aria-label="Close installation guide">×</button>
+      <span className="eyebrow">LIFEQUEST APP INSTALLATION</span>
+      <h2 id="install-guide-title">{guide.title}</h2>
+      <p>{guide.intro}</p>
+      <ol>{guide.steps.map((step) => <li key={step}>{step}</li>)}</ol>
+      <button className="glow-btn full" onClick={platform === "ios" ? close : () => window.location.reload()}>
+        {platform === "ios" ? "GOT IT — OPEN SAFARI MENU" : "REFRESH & CHECK NATIVE INSTALL"}
+      </button>
+      <small>This installs the secure LifeQuest PWA from the deployed website; it does not download a separate APK.</small>
+    </section>
+  </div>;
+}
+
+function SettingsModule({ state, setState, account, logout, notify, today, isInstalled, canInstall, installApp }: { state: LifeQuestState; setState: React.Dispatch<React.SetStateAction<LifeQuestState>>; account: AppAccount | null; logout: () => void; notify: (message: string) => void; today: string; isInstalled: boolean; canInstall: boolean; installApp: () => Promise<void> }) {
   const settings = state.settings || DEFAULT_STATE.settings;
   const resetToday = () => { if (!window.confirm("Reset all task and habit checkmarks for today?")) return; setState((s) => ({ ...s, tasks: s.tasks.map((x) => ({ ...x, done: false })), habits: s.habits.map((x) => ({ ...x, done: false })), revisions: s.revisions.map((x) => ({ ...x, done: false })), changeHabits: s.changeHabits.map((x) => ({ ...x, done: false })) })); notify("Today's mission status reset"); };
   const resetJourney = () => { if (!window.confirm("Restart the 90-day journey from Day 1? Your custom tasks and expenses will stay.")) return; setState((s) => ({ ...s, profile: { ...s.profile, day: 1, xp: 0, coins: 0, streak: 0, journeyStartedOn: today || s.profile.journeyStartedOn, lastActiveDate: today || s.profile.lastActiveDate } })); notify("90-day campaign restarted"); };
@@ -848,7 +915,7 @@ function SettingsModule({ state, setState, account, logout, notify, today, isIns
     <section className="settings-grid"><article className="game-panel setting-card"><span className="eyebrow">PLAYER PROFILE</span><h2>{state.profile.name}</h2><p>{account?.method === "google" ? "Gmail OTP profile" : "Mobile OTP profile"} · {account?.label}</p><p>90-day journey started: {state.profile.journeyStartedOn ? dateFromKey(state.profile.journeyStartedOn).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" }) : "Syncing…"}</p><label>Display name<input value={state.profile.name} onChange={(e) => setState((s) => ({ ...s, profile: { ...s.profile, name: e.target.value } }))}/></label><button className="secondary-btn" onClick={logout}>LOG OUT</button></article>
       <article className="game-panel setting-card"><span className="eyebrow">GAME EXPERIENCE</span><h2>Interface loadout</h2><label>Theme<select value={settings.theme} onChange={(e) => update({ theme: e.target.value as LifeQuestState["settings"]["theme"] })}><option value="cyber">Cyber Cyan</option><option value="royal">Royal Purple</option><option value="stealth">Stealth Red</option></select></label><div className="setting-toggle"><span><strong>Compact dashboard</strong><small>Fit more missions on screen</small></span><button className={`toggle ${settings.compact ? "on" : ""}`} onClick={() => update({ compact: !settings.compact })}><i/></button></div><div className="setting-toggle"><span><strong>Alarm sound</strong><small>Play the repeating wake-up tone</small></span><button className={`toggle ${settings.sound ? "on" : ""}`} onClick={() => update({ sound: !settings.sound })}><i/></button></div></article>
       <article className="game-panel setting-card"><span className="eyebrow">GAME RULES</span><h2>Your difficulty</h2><label>Daily priority mission goal<input type="number" min="1" max="12" value={settings.dailyGoal} onChange={(e) => update({ dailyGoal: Number(e.target.value) })}/></label><label>Coin reward multiplier<select value={settings.coinMultiplier} onChange={(e) => update({ coinMultiplier: Number(e.target.value) })}><option value={0.5}>0.5× Hard</option><option value={1}>1× Balanced</option><option value={1.5}>1.5× Boosted</option></select></label><p className="info-chip">You can also customize habits, missions, rewards, alarms and gym days inside their own modules.</p></article>
-      <article className="game-panel setting-card"><span className="eyebrow">MOBILE & DESKTOP APP</span><h2>{isInstalled ? "LifeQuest is installed" : "Install LifeQuest"}</h2><p>Open it from your Android, iPhone, Windows or Mac home screen like an app. Your secure session stays signed in for up to 90 days.</p><button className="glow-btn full" onClick={() => void installApp()}>{isInstalled ? "✓ APP INSTALLED" : "INSTALL / ADD TO HOME SCREEN"}</button><p className="info-chip">On iPhone: Safari → Share → Add to Home Screen. On Android/desktop: browser menu → Install app.</p></article>
+      <article className="game-panel setting-card"><span className="eyebrow">MOBILE & DESKTOP APP</span><h2>{isInstalled ? "LifeQuest is installed" : "Install LifeQuest"}</h2><p>Open it from your Android, iPhone, Windows or Mac home screen like an app. Your secure session stays signed in for up to 90 days.</p><button className="glow-btn full" disabled={isInstalled} onClick={() => void installApp()}>{isInstalled ? "✓ APP INSTALLED" : canInstall ? "INSTALL LIFEQUEST NOW" : "SHOW INSTALL STEPS"}</button><p className="info-chip">On iPhone: Safari → Share → Add to Home Screen. On Android/desktop: the native install prompt opens when available.</p></article>
       <article className="game-panel setting-card danger-zone"><span className="eyebrow">RESET ZONE</span><h2>Reset controls</h2><button onClick={resetToday}>RESET TODAY&apos;S CHECKMARKS <small>Keep all tasks, clear completion only</small></button><button onClick={resetJourney}>RESTART 90-DAY JOURNEY <small>Keep personal plans and expenses</small></button><button className="danger" onClick={factoryReset}>FACTORY RESET APP <small>Clear all customized profile data</small></button><button className="danger" onClick={() => void deleteAccount()}>DELETE ACCOUNT <small>Permanently erase profile, progress and sessions</small></button></article></section>
   </>;
 }

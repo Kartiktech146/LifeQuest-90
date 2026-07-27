@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const pageSource = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+const pwaRegisterSource = await readFile(new URL("../app/pwa-register.tsx", import.meta.url), "utf8");
 const styleSource = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
 const serviceWorkerSource = await readFile(new URL("../public/sw.js", import.meta.url), "utf8");
 const authSource = await readFile(new URL("../lib/auth.ts", import.meta.url), "utf8");
@@ -21,7 +22,13 @@ test("reminders, install flow and readable mobile navigation are wired", () => {
   assert.match(pageSource, /function isReminderDue/);
   assert.match(pageSource, /window\.setInterval\(checkReminders,\s*15_000\)/);
   assert.match(pageSource, /beforeinstallprompt/);
-  assert.match(pageSource, /INSTALL LIFEQUEST APP/);
+  assert.doesNotMatch(pageSource, /className="install-login"/);
+  assert.match(pageSource, /function InstallAppGuide/);
+  assert.match(pageSource, /function detectInstallPlatform/);
+  assert.match(pageSource, /SHOW INSTALL STEPS/);
+  assert.match(pwaRegisterSource, /lifequest-install-ready/);
+  assert.match(styleSource, /\.install-guide-backdrop\{[^}]*z-index:4000/);
+  assert.match(serviceWorkerSource, /lifequest-90-v4/);
   assert.match(styleSource, /\.nav-label\{display:block;font-size:10px!important\}/);
   assert.doesNotMatch(styleSource, /\.nav-item\{font-size:0!important/);
   assert.match(authSource, /60 \* 60 \* 24 \* 90/);
